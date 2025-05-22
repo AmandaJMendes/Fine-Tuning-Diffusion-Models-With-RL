@@ -12,7 +12,7 @@ def generate_batch(
         latents: shape (B, T, C, H, W)
         next_latents: shape (B, T, C, H, W)
         log_probs: shape (B, T)
-        timesteps: shape (B, T)
+        timesteps: shape (T)
     """
 
     # Start from pure noise
@@ -29,28 +29,26 @@ def generate_batch(
     # Generate trajectory by iterating through the diffusion process
     for t in scheduler.timesteps:
         # Append the latents to the list
-        latents_list.append(latents)
+        latents_list.append(latents.cpu())
 
         # Get the model prediction
         with torch.no_grad():
             pred_noise = model(latents, t).sample
 
         # Step the scheduler to get the next latents
-        scheduler_output, log_prob = scheduler.step(pred_noise, t, latents)
+        scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=1.0)
         latents = scheduler_output.prev_sample
 
         # Append the log_prob and new latents to the lists
         log_probs_list.append(log_prob)
-        next_latents_list.append(latents)
-        timesteps_list.append(t)
+        next_latents_list.append(latents.cpu())
+        timesteps_list.append(t.cpu())
 
     # Convert the lists to tensors and reshape them
-    latents = torch.stack(latents_list).to(device).permute(1, 0, 2, 3, 4) #shape: (B, T, C, H, W)
-    next_latents = torch.stack(next_latents_list).to(device).permute(1, 0, 2, 3, 4) #shape: (B, T, C, H, W)
-    log_probs = torch.stack(log_probs_list).to(device).permute(1, 0) #shape: (B, T)
-
-    timesteps = torch.tensor(timesteps_list, device=device)
-    timesteps = torch.broadcast_to(timesteps, (batch_size, len(timesteps_list))) #shape: (B, T)
+    latents = torch.stack(latents_list).permute(1, 0, 2, 3, 4) #shape: (B, T, C, H, W)
+    next_latents = torch.stack(next_latents_list).permute(1, 0, 2, 3, 4) #shape: (B, T, C, H, W)
+    log_probs = torch.stack(log_probs_list).permute(1, 0) #shape: (B, T)
+    timesteps = torch.tensor(timesteps_list) #shape: (T)
 
     return latents, next_latents, log_probs, timesteps
 
@@ -75,7 +73,7 @@ def rescore_batch(
     pred_noise = model(latents, timesteps).sample
 
     # Step the scheduler to get the log prob of next_latents given latents  
-    _, log_prob = scheduler.step(pred_noise, timesteps, latents, next_latents)
+    _, log_prob = scheduler.step(pred_noise, timesteps, latents, next_latents, eta=1.0)
 
     return log_prob
 
@@ -83,25 +81,36 @@ def rescore_batch(
 if __name__ == "__main__":
     from diffusers import UNet2DModel
     from custom_ddim_scheduler import CustomDDIMScheduler
-    
+    from utils import display_sample
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     # Load the model and scheduler
     scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors = True)
     pretrained_model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
 
+    # Set the timesteps and move the alphas_cumprod to the device
+    scheduler.set_timesteps(50, device=device)
+    scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
+
     # Generate a batch of images
-    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model, scheduler, 3, device)
+    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model, scheduler, 7, device)
+    print(latents.shape, next_latents.shape, log_probs.shape, timesteps.shape)
+
+    # Display some images
+    for i in range(3):
+        for t in range(40, 50, 2):
+            display_sample(latents[i, t:], f"Latent {i} at t={t}")
 
     # Rescore the batch and backpropagate for each timestep
-    for t in range(timesteps.shape[1]):
+    for t in range(timesteps.shape[0]):
         new_log_probs = rescore_batch(
             pretrained_model, 
             scheduler, 
-            latents[:, t], 
-            next_latents[:, t], 
-            timesteps[:, t]
+            latents[:, t].to(device), 
+            next_latents[:, t].to(device), 
+            timesteps[t].to(device)
         )
-        print(new_log_probs.shape)
         #backpropagate
     # step
