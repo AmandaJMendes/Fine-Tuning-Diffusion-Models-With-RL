@@ -136,26 +136,23 @@ class CustomDDIMScheduler(DDIMScheduler):
                 prev_sample = prev_sample_mean + variance
             else:
                 prev_sample = prev_sample_mean
+                std_dev_t = 1e-10 # Only to avoid math domain error when computing log_prob
         else: # Use provided latent directly
             prev_sample = prev_sampled_latent
-        
+
         log_prob = (
             -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_t**2))
-            - math.log(std_dev_t)
-            - math.log(math.sqrt(2 * math.pi))
+            - torch.log(std_dev_t)
+            - torch.log(torch.sqrt(torch.tensor(2 * math.pi)))
         )
 
         log_prob = torch.mean(log_prob, axis=tuple(range(1, log_prob.ndim)))
-        #----------- End of Custom Code -----------
 
         if not return_dict:
             return (
                 prev_sample,
                 pred_original_sample,
+                log_prob
             )
 
-        return DDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
-
-# Use your subclass
-scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors=True)
-print(scheduler.config)
+        return DDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample), log_prob
