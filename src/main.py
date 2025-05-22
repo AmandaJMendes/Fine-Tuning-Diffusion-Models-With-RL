@@ -31,16 +31,17 @@ def generate_batch(
         # Append the latents to the list
         latents_list.append(latents.cpu())
 
-        # Get the model prediction
+        # Disable gradient calculation since these samples are not part of the training loop
         with torch.no_grad():
+            # Get the model prediction
             pred_noise = model(latents, t).sample
 
-        # Step the scheduler to get the next latents
-        scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=1.0)
-        latents = scheduler_output.prev_sample
+            # Step the scheduler to get the next latents
+            scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=1.0)
+            latents = scheduler_output.prev_sample
 
         # Append the log_prob and new latents to the lists
-        log_probs_list.append(log_prob)
+        log_probs_list.append(log_prob.cpu())
         next_latents_list.append(latents.cpu())
         timesteps_list.append(t.cpu())
 
@@ -96,6 +97,7 @@ if __name__ == "__main__":
 
     # Generate a batch of images
     latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model, scheduler, 7, device)
+    torch.cuda.empty_cache()
     print(latents.shape, next_latents.shape, log_probs.shape, timesteps.shape)
 
     # Display some images
@@ -112,5 +114,15 @@ if __name__ == "__main__":
             next_latents[:, t].to(device), 
             timesteps[t].to(device)
         )
+        
+        print(t)
+        print(f"Currently allocated : {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+        print(f"Currently reserved  : {torch.cuda.memory_reserved()  / 1024**2:.1f} MB")
+        new_log_probs.sum().backward()
+        print(f"Currently allocated : {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+        print(f"Currently reserved  : {torch.cuda.memory_reserved()  / 1024**2:.1f} MB")
+        torch.cuda.empty_cache()
+        print(f"Currently allocated : {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
+        print(f"Currently reserved  : {torch.cuda.memory_reserved()  / 1024**2:.1f} MB")
         #backpropagate
     # step
