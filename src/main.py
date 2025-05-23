@@ -83,20 +83,30 @@ if __name__ == "__main__":
     from diffusers import UNet2DModel
     from custom_ddim_scheduler import CustomDDIMScheduler
     from utils import display_sample
+    from accelerate import Accelerator
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Define hyperparameters
+    PER_GPU_BATCH_SIZE = 6
+    INFERENCE_TIMESTEPS = 50
+    
+    # Initialize the accelerator
+    accelerator = Accelerator()
+    device = accelerator.device
     print(f"Using device: {device}")
 
     # Load the model and scheduler
     scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors = True)
     pretrained_model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
+    
+    # Prepare the model for DDP
+    pretrained_model = accelerator.prepare(pretrained_model)                   
 
     # Set the timesteps and move the alphas_cumprod to the device
-    scheduler.set_timesteps(50, device=device)
+    scheduler.set_timesteps(INFERENCE_TIMESTEPS, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
     # Generate a batch of images
-    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model, scheduler, 7, device)
+    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
     torch.cuda.empty_cache()
     print(latents.shape, next_latents.shape, log_probs.shape, timesteps.shape)
 
@@ -108,21 +118,17 @@ if __name__ == "__main__":
     # Rescore the batch and backpropagate for each timestep
     for t in range(timesteps.shape[0]):
         new_log_probs = rescore_batch(
-            pretrained_model, 
+            pretrained_model.module, 
             scheduler, 
             latents[:, t].to(device), 
             next_latents[:, t].to(device), 
             timesteps[t].to(device)
         )
         
-        print(t)
-        print(f"Currently allocated : {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
-        print(f"Currently reserved  : {torch.cuda.memory_reserved()  / 1024**2:.1f} MB")
-        new_log_probs.sum().backward()
-        print(f"Currently allocated : {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
-        print(f"Currently reserved  : {torch.cuda.memory_reserved()  / 1024**2:.1f} MB")
+        loss = new_log_probs.sum()
+        print(f"device={device} t={t}  loss={loss.item():.4f}")
+        accelerator.backward(loss)
         torch.cuda.empty_cache()
-        print(f"Currently allocated : {torch.cuda.memory_allocated() / 1024**2:.1f} MB")
-        print(f"Currently reserved  : {torch.cuda.memory_reserved()  / 1024**2:.1f} MB")
+       
         #backpropagate
     # step
