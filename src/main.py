@@ -84,10 +84,13 @@ if __name__ == "__main__":
     from custom_ddim_scheduler import CustomDDIMScheduler
     from utils import display_sample
     from accelerate import Accelerator
+    from rewards import reward_function
 
     # Define hyperparameters
     PER_GPU_BATCH_SIZE = 6
     INFERENCE_TIMESTEPS = 50
+    FULL_EPOCHS = 5
+    EPOCHS_PER_SAMPLING = 1
     
     # Initialize the accelerator
     accelerator = Accelerator()
@@ -97,38 +100,72 @@ if __name__ == "__main__":
     # Load the model and scheduler
     scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors = True)
     pretrained_model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
-    
+
+    # Define the optimizer
+    optimizer = torch.optim.AdamW(pretrained_model.parameters(), lr=1e-6)
+
     # Prepare the model for DDP
-    pretrained_model = accelerator.prepare(pretrained_model)                   
+    pretrained_model, optimizer = accelerator.prepare(pretrained_model, optimizer)                   
 
     # Set the timesteps and move the alphas_cumprod to the device
     scheduler.set_timesteps(INFERENCE_TIMESTEPS, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
-    # Generate a batch of images
-    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
-    torch.cuda.empty_cache()
-    print(latents.shape, next_latents.shape, log_probs.shape, timesteps.shape)
+    for epoch in range(FULL_EPOCHS):
+        if accelerator.is_main_process:
+            print(f"Epoch {epoch}")
 
-    # Display some images
-    for i in range(3):
-        for t in range(40, 50, 2):
-            display_sample(latents[i, t:], f"Latent {i} at t={t}")
-
-    # Rescore the batch and backpropagate for each timestep
-    for t in range(timesteps.shape[0]):
-        new_log_probs = rescore_batch(
-            pretrained_model.module, 
-            scheduler, 
-            latents[:, t].to(device), 
-            next_latents[:, t].to(device), 
-            timesteps[t].to(device)
-        )
-        
-        loss = new_log_probs.sum()
-        print(f"device={device} t={t}  loss={loss.item():.4f}")
-        accelerator.backward(loss)
+        # Generate a batch of images
+        latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
         torch.cuda.empty_cache()
-       
-        #backpropagate
-    # step
+        print(latents.shape, next_latents.shape, log_probs.shape, timesteps.shape)
+
+        # Get the rewards
+        rewards, _ = reward_function(next_latents[:, -1])
+        rewards = rewards.to(device)
+        all_rewards = accelerator.gather(rewards)    
+        global_mean = all_rewards.mean()
+        global_std  = all_rewards.std(unbiased=False)
+        if accelerator.is_main_process: # only print on the main process
+            print(f"rewards={all_rewards} global_mean={global_mean} global_std={global_std}")
+        
+        #Compute the normalized rewards / advantage
+        advantages = (rewards - global_mean) / global_std
+
+        # Display some images
+        # for i in range(3):
+        #     for t in range(40, 50, 2):
+        #         display_sample(latents[i, t:], f"Latent {i} at t={t}")
+
+        # Backpropagate for each timestep
+        for t in range(timesteps.shape[0]-1):
+            # Get new likelihoods
+            new_log_probs = rescore_batch(
+                pretrained_model.module, 
+                scheduler, 
+                latents[:, t].to(device), 
+                next_latents[:, t].to(device), 
+                timesteps[t].to(device)
+            )
+
+            # Importance Sampling Ratio
+            importance_ratio = torch.exp(new_log_probs - log_probs[:, t].to(device))
+
+            # PPO clipping
+            clipped_ratio = torch.clamp(importance_ratio, 1 - 1e-4, 1 + 1e-4)
+            loss_clip = torch.min(importance_ratio * advantages, clipped_ratio * advantages)
+
+            # Compute the total loss
+            loss = -loss_clip.mean()
+            if accelerator.is_main_process:
+                print(f"t={t} loss={loss_clip}")
+
+            # Backpropagate and clear the cache
+            accelerator.backward(loss)
+            torch.cuda.empty_cache()
+        
+        # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs
+        if accelerator.sync_gradients:    
+            print(f"Stepping the optimizer")
+            optimizer.step()
+            optimizer.zero_grad()
