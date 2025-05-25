@@ -199,12 +199,12 @@ if __name__ == "__main__":
                     optimizer.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
 
-    # Save some samples
-    print(f"Saving {num_samples_per_gpu} samples in device {device}")
-    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, num_samples_per_gpu, device)
-    
-    for i in range(num_samples_per_gpu):
-        display_sample(next_latents[i:i+1, -1], f"Device {device} Final sample {i}")
+        # Save some samples
+        print(f"Saving {num_samples_per_gpu} samples in device {device}")
+        latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, num_samples_per_gpu, device)
+        
+        for i in range(num_samples_per_gpu):
+            display_sample(next_latents[i:i+1, -1], f"Epoch {epoch} Device {device} Final sample {i}")
 
     # Plot the global rewards history
     if accelerator.is_main_process and global_rewards_history:
