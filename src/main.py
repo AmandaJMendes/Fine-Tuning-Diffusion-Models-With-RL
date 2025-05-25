@@ -1,4 +1,5 @@
 import torch
+import matplotlib.pyplot as plt
 
 def generate_batch(
     model,   
@@ -87,11 +88,11 @@ if __name__ == "__main__":
     from rewards import reward_function
 
     # Define hyperparameters
-    PER_GPU_BATCH_SIZE = 4
+    PER_GPU_BATCH_SIZE = 5
     INFERENCE_TIMESTEPS = 50
-    FULL_EPOCHS = 5
+    FULL_EPOCHS = 10
     EPOCHS_PER_SAMPLING = 2
-    SAMPLES_PER_EPOCH = 120
+    SAMPLES_PER_EPOCH = 200
     
     # Initialize the accelerator
     accelerator = Accelerator()
@@ -116,6 +117,9 @@ if __name__ == "__main__":
     scheduler.set_timesteps(INFERENCE_TIMESTEPS, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
+    # Initialize list to store global rewards for plotting
+    global_rewards_history = []
+
     for epoch in range(FULL_EPOCHS):
         if accelerator.is_main_process:
             print(f"Epoch {epoch}")
@@ -128,6 +132,7 @@ if __name__ == "__main__":
             batches.append((latents, next_latents, log_probs, timesteps))
             torch.cuda.empty_cache()
 
+        epoch_rewards = []
         for inner_epoch in range(EPOCHS_PER_SAMPLING):
             for batch in batches:
                 # Get the rewards
@@ -139,13 +144,11 @@ if __name__ == "__main__":
                 if accelerator.is_main_process: # only print on the main process
                     print(f"rewards={all_rewards} global_mean={global_mean} global_std={global_std}")
                 
+                # Store rewards for this epoch
+                epoch_rewards.append(global_mean.item())
+                
                 #Compute the normalized rewards / advantage
                 advantages = (rewards - global_mean) / global_std
-
-                # Display some images
-                # for i in range(3):
-                #     for t in range(40, 50, 2):
-                #         display_sample(latents[i, t:], f"Latent {i} at t={t}")
 
                 # Backpropagate for each timestep
                 for t in range(timesteps.shape[0]-1):
@@ -183,3 +186,27 @@ if __name__ == "__main__":
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
+
+        # Store the average reward for this epoch
+        if epoch_rewards and accelerator.is_main_process:
+            avg_epoch_reward = sum(epoch_rewards) / len(epoch_rewards)
+            global_rewards_history.append(avg_epoch_reward)
+            print(f"Epoch {epoch} average reward: {avg_epoch_reward}")
+
+    # Save some samples
+    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
+    
+    for i in range(PER_GPU_BATCH_SIZE):
+        display_sample(next_latents[i:i+1, -1], f"Device {device} Final sample {i}")
+
+    # Plot the global rewards history
+    if accelerator.is_main_process and global_rewards_history:
+        plt.figure(figsize=(10, 6))
+        plt.plot(range(len(global_rewards_history)), global_rewards_history, 'b-', linewidth=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Average Global Reward')
+        plt.title('Global Reward Progress During Training')
+        plt.grid(True, alpha=0.3)
+        plt.savefig('global_rewards_plot.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        print(f"Saved reward plot to global_rewards_plot.png")
