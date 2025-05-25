@@ -90,9 +90,9 @@ if __name__ == "__main__":
     # Define hyperparameters
     PER_GPU_BATCH_SIZE = 5
     INFERENCE_TIMESTEPS = 50
-    FULL_EPOCHS = 10
+    FULL_EPOCHS = 3
     EPOCHS_PER_SAMPLING = 2
-    SAMPLES_PER_EPOCH = 200
+    SAMPLES_PER_EPOCH = 100
     
     # Initialize the accelerator
     accelerator = Accelerator()
@@ -126,26 +126,39 @@ if __name__ == "__main__":
 
         # Generate a batch of images
         batches = []
+        all_rewards = []
         print(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {PER_GPU_BATCH_SIZE}")
         for _ in range(num_batches_per_gpu):
             latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
-            batches.append((latents, next_latents, log_probs, timesteps))
+            
+            # Get the rewards
+            rewards, _ = reward_function(next_latents[:, -1])
+            rewards = rewards.to(device)
+            all_batch_rewards = accelerator.gather(rewards)    
+            all_rewards.append(all_batch_rewards)
+            if accelerator.is_main_process: # only print on the main process
+                print(f"rewards={all_batch_rewards}")
+
+            batches.append((latents, next_latents, log_probs, timesteps, rewards))
             torch.cuda.empty_cache()
 
-        epoch_rewards = []
+        # Compute reward avg and std
+        all_rewards = torch.cat(all_rewards)
+        global_mean = all_rewards.mean()
+        global_std  = all_rewards.std(unbiased=False)
+
+        # Store the average reward for this epoch
+        if accelerator.is_main_process:
+            global_rewards_history.append(global_mean.item())
+            print(f"Epoch {epoch} average reward: {global_mean.item()}")
+
         for inner_epoch in range(EPOCHS_PER_SAMPLING):
-            for batch in batches:
-                # Get the rewards
-                rewards, _ = reward_function(batch[1][:, -1])
-                rewards = rewards.to(device)
-                all_rewards = accelerator.gather(rewards)    
-                global_mean = all_rewards.mean()
-                global_std  = all_rewards.std(unbiased=False)
-                if accelerator.is_main_process: # only print on the main process
-                    print(f"rewards={all_rewards} global_mean={global_mean} global_std={global_std}")
-                
-                # Store rewards for this epoch
-                epoch_rewards.append(global_mean.item())
+            for b, batch in enumerate(batches):
+                if accelerator.is_main_process:
+                    print(f"Batch {b+1}/{len(batches)}")
+
+                # Unpack the batch
+                latents, next_latents, log_probs, timesteps, rewards = batch 
                 
                 #Compute the normalized rewards / advantage
                 advantages = (rewards - global_mean) / global_std
@@ -182,21 +195,15 @@ if __name__ == "__main__":
                 
                 # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs
                 if accelerator.sync_gradients:    
-                    print(f"Stepping the optimizer")
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
 
-        # Store the average reward for this epoch
-        if epoch_rewards and accelerator.is_main_process:
-            avg_epoch_reward = sum(epoch_rewards) / len(epoch_rewards)
-            global_rewards_history.append(avg_epoch_reward)
-            print(f"Epoch {epoch} average reward: {avg_epoch_reward}")
-
     # Save some samples
-    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
+    print(f"Saving {num_samples_per_gpu} samples in device {device}")
+    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, num_samples_per_gpu, device)
     
-    for i in range(PER_GPU_BATCH_SIZE):
+    for i in range(num_samples_per_gpu):
         display_sample(next_latents[i:i+1, -1], f"Device {device} Final sample {i}")
 
     # Plot the global rewards history
