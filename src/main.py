@@ -1,5 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
+import torch.distributed as dist
 
 def generate_batch(
     model,   
@@ -79,6 +80,38 @@ def rescore_batch(
 
     return log_prob
 
+def check_model_sync(accelerator, model, tol=1e-6):
+    """
+    Check if model parameters are synced across GPUs.
+    
+    Args:
+        accelerator: The accelerator object
+        model: The model to check
+    """
+    model = accelerator.unwrap_model(model)
+    device = next(model.parameters()).device
+
+    max_diff = torch.tensor(0.0, device=device)
+    for p in model.parameters():
+        # Copy local data into two buffers
+        local = p.data
+        global_max = local.clone()
+        global_min = local.clone()
+
+        # Compute per‐element max and min across all ranks
+        dist.all_reduce(global_max, op=dist.ReduceOp.MAX)
+        dist.all_reduce(global_min, op=dist.ReduceOp.MIN)
+
+        # Largest abs difference on this tensor
+        diff = (global_max - global_min).abs().max()
+        max_diff = torch.max(max_diff, diff)
+
+    if accelerator.is_main_process:
+        print(f"Max |Δparam| across all ranks = {max_diff:.3e}")
+        if max_diff <= tol:
+            print(f"✅ Parameters agree within ±{tol}")
+        else:
+            print(f"❌ Some params differ by more than ±{tol}")
 
 if __name__ == "__main__":
     from diffusers import UNet2DModel
@@ -90,7 +123,7 @@ if __name__ == "__main__":
     # Define hyperparameters
     PER_GPU_BATCH_SIZE = 5
     INFERENCE_TIMESTEPS = 50
-    FULL_EPOCHS = 3
+    FULL_EPOCHS = 10
     EPOCHS_PER_SAMPLING = 2
     SAMPLES_PER_EPOCH = 100
     
@@ -124,6 +157,9 @@ if __name__ == "__main__":
         if accelerator.is_main_process:
             print(f"Epoch {epoch}")
 
+        # Check if models are synced across GPUs
+        check_model_sync(accelerator, pretrained_model)
+
         # Generate a batch of images
         batches = []
         all_rewards = []
@@ -132,7 +168,8 @@ if __name__ == "__main__":
             latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
             
             # Get the rewards
-            rewards, _ = reward_function(next_latents[:, -1])
+            rewards, scores = reward_function(next_latents[:, -1])
+            print(f"scores={scores}")
             rewards = rewards.to(device)
             all_batch_rewards = accelerator.gather(rewards)    
             all_rewards.append(all_batch_rewards)
@@ -146,6 +183,7 @@ if __name__ == "__main__":
         all_rewards = torch.cat(all_rewards)
         global_mean = all_rewards.mean()
         global_std  = all_rewards.std(unbiased=False)
+        print(f"device={device}, global_mean={global_mean}, global_std={global_std}")
 
         # Store the average reward for this epoch
         if accelerator.is_main_process:
@@ -193,18 +231,23 @@ if __name__ == "__main__":
                     del lat_gpu, nxt_gpu, t_gpu, loss, new_log_probs, importance_ratio, clipped_ratio
                     torch.cuda.empty_cache()
                 
-                # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs
-                if accelerator.sync_gradients:    
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    torch.cuda.empty_cache()
+                # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs          
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
 
-        # Save some samples
-        print(f"Saving {num_samples_per_gpu} samples in device {device}")
-        latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, num_samples_per_gpu, device)
-        
-        for i in range(num_samples_per_gpu):
-            display_sample(next_latents[i:i+1, -1], f"Epoch {epoch} Device {device} Final sample {i}")
+                torch.cuda.synchronize()
+                accelerator.wait_for_everyone()
+
+    # Check if models are synced across GPUs
+    check_model_sync(accelerator, pretrained_model)
+
+    # Save some samples
+    print(f"Saving {num_samples_per_gpu} samples in device {device}")
+    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, num_samples_per_gpu, device)
+    
+    for i in range(num_samples_per_gpu):
+        display_sample(next_latents[i:i+1, -1], f"Device {device} Final sample {i}")
 
     # Plot the global rewards history
     if accelerator.is_main_process and global_rewards_history:
