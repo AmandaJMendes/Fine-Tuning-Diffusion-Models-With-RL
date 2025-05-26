@@ -54,13 +54,18 @@ def reward_function(latents_batch):
     image_processed = image_processed.numpy().astype(np.uint8)
     images = [PIL.Image.fromarray(image_processed[i]) for i in range(image_processed.shape[0])]
     
-    #ir_person = image_reward(images)
+    ir_person = image_reward(images, "a natural, high-quality portrait photograph of a person with realistic facial features, normal hair color, natural expression, and clean background")
     #ir_man = image_reward(images, "sharp, photo-realistic portrait of a man, no noise artifacts")
     sex_score = gender_reward(images)
-    aesthetics_score = aesthetics_reward(images)
+    #aesthetics_score = aesthetics_reward(images)
 
     sex_score = torch.tensor(sex_score)
-    aesthetics_score = torch.tensor(aesthetics_score)
-    total_score = aesthetics_score * (0.2 + (1 - 0.2) * sex_score)
+    ir_person = torch.tensor(ir_person)
+    #aesthetics_score = torch.tensor(aesthetics_score)
+    
+    # Convert sex score to binary: 1 if > 0.5, else 0
+    sex_score_binary = (sex_score > 0.5).float()
+    
+    total_score = ir_person + 2*sex_score_binary
 
-    return total_score, {'aesthetics_score': aesthetics_score, 'sex_score': sex_score}
+    return total_score, {'ir_person': ir_person, 'sex_score': sex_score_binary}
