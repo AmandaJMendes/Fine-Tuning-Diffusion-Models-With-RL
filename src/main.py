@@ -126,9 +126,11 @@ if __name__ == "__main__":
     FULL_EPOCHS = 10
     EPOCHS_PER_SAMPLING = 2
     SAMPLES_PER_EPOCH = 100
+    FIRST_TRAIN_STEP = 0  # First timestep to train on (inclusive)
+    LAST_TRAIN_STEP = 48  # Last timestep to train on (inclusive)
     
     # Initialize the accelerator
-    accelerator = Accelerator(gradient_accumulation_steps=INFERENCE_TIMESTEPS-1) # -1 because we're not training on the last timestep
+    accelerator = Accelerator(gradient_accumulation_steps=LAST_TRAIN_STEP - FIRST_TRAIN_STEP + 1)
     device = accelerator.device
     print(f"Using device: {device}")
 
@@ -201,8 +203,8 @@ if __name__ == "__main__":
                 #Compute the normalized rewards / advantage
                 advantages = (rewards - global_mean) / global_std
 
-                # Backpropagate accumulating gradients for each timestep    
-                for t in range(timesteps.shape[0]-1):
+                # Backpropagate accumulating gradients for each timestep within the training range
+                for t in range(FIRST_TRAIN_STEP, LAST_TRAIN_STEP + 1):
                     with accelerator.accumulate(pretrained_model):
                         # Get new likelihoods
                         lat_gpu = latents[:, t].to(device, non_blocking=True)
