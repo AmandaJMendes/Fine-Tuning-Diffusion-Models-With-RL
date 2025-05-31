@@ -128,7 +128,7 @@ if __name__ == "__main__":
     SAMPLES_PER_EPOCH = 100
     
     # Initialize the accelerator
-    accelerator = Accelerator()
+    accelerator = Accelerator(gradient_accumulation_steps=INFERENCE_TIMESTEPS-1) # -1 because we're not training on the last timestep
     device = accelerator.device
     print(f"Using device: {device}")
 
@@ -201,40 +201,44 @@ if __name__ == "__main__":
                 #Compute the normalized rewards / advantage
                 advantages = (rewards - global_mean) / global_std
 
-                # Backpropagate for each timestep
+                # Backpropagate accumulating gradients for each timestep    
                 for t in range(timesteps.shape[0]-1):
-                    # Get new likelihoods
-                    lat_gpu = latents[:, t].to(device, non_blocking=True)
-                    nxt_gpu = next_latents[:, t].to(device, non_blocking=True)
-                    t_gpu = timesteps[t].to(device, non_blocking=True)
+                    with accelerator.accumulate(pretrained_model):
+                        # Get new likelihoods
+                        lat_gpu = latents[:, t].to(device, non_blocking=True)
+                        nxt_gpu = next_latents[:, t].to(device, non_blocking=True)
+                        t_gpu = timesteps[t].to(device, non_blocking=True)
 
-                    new_log_probs = rescore_batch(
-                        pretrained_model.module, 
-                        scheduler, 
-                        lat_gpu, 
-                        nxt_gpu, 
-                        t_gpu
-                    )
+                        new_log_probs = rescore_batch(
+                            pretrained_model.module, 
+                            scheduler, 
+                            lat_gpu, 
+                            nxt_gpu, 
+                            t_gpu
+                        )
 
-                    # Importance Sampling Ratio
-                    importance_ratio = torch.exp(new_log_probs - log_probs[:, t].to(device))
+                        # Importance Sampling Ratio
+                        importance_ratio = torch.exp(new_log_probs - log_probs[:, t].to(device))
 
-                    # PPO clipping
-                    clipped_ratio = torch.clamp(importance_ratio, 1 - 1e-4, 1 + 1e-4)
-                    loss_clip = torch.min(importance_ratio * advantages, clipped_ratio * advantages)
+                        # PPO clipping
+                        clipped_ratio = torch.clamp(importance_ratio, 1 - 1e-4, 1 + 1e-4)
+                        loss_clip = torch.min(importance_ratio * advantages, clipped_ratio * advantages)
 
-                    # Compute the total loss
-                    loss = -loss_clip.mean()
+                        # Compute the total loss
+                        loss = -loss_clip.mean()
 
-                    # Backpropagate and clear the cache
-                    accelerator.backward(loss)
-                    del lat_gpu, nxt_gpu, t_gpu, loss, new_log_probs, importance_ratio, clipped_ratio
-                    torch.cuda.empty_cache()
-                
-                # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs          
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                torch.cuda.empty_cache()
+                        # Backpropagate and clear the cache
+                        accelerator.backward(loss)
+                        del lat_gpu, nxt_gpu, t_gpu, loss, new_log_probs, importance_ratio, clipped_ratio
+                        torch.cuda.empty_cache()
+                    
+                        # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs 
+                        if accelerator.sync_gradients:
+                            #print(f"({device}) Syncing gradients in timestep {t}")
+                            pass
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                        torch.cuda.empty_cache()
 
                 torch.cuda.synchronize()
                 accelerator.wait_for_everyone()
@@ -260,3 +264,10 @@ if __name__ == "__main__":
         plt.savefig('global_rewards_plot.png', dpi=300, bbox_inches='tight')
         plt.show()
         print(f"Saved reward plot to global_rewards_plot.png")
+
+    # Save the model
+    import time
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    if accelerator.is_main_process:
+        model_to_save = accelerator.unwrap_model(pretrained_model)
+        model_to_save.save_pretrained(f"./final_model_{timestamp}") 
