@@ -114,48 +114,54 @@ def check_model_sync(accelerator, model, tol=1e-6):
             print(f"❌ Some params differ by more than ±{tol}")
 
 if __name__ == "__main__":
+    import argparse
+    import json
     from diffusers import UNet2DModel
     from custom_ddim_scheduler import CustomDDIMScheduler
     from utils import display_sample
     from accelerate import Accelerator
     from rewards import reward_function
 
-    # Define hyperparameters
-    PER_GPU_BATCH_SIZE = 5
-    INFERENCE_TIMESTEPS = 50
-    FULL_EPOCHS = 10
-    EPOCHS_PER_SAMPLING = 2
-    SAMPLES_PER_EPOCH = 100
-    FIRST_TRAIN_STEP = 0  # First timestep to train on (inclusive)
-    LAST_TRAIN_STEP = 48  # Last timestep to train on (inclusive)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Fine-tune diffusion model with RL')
+    parser.add_argument('--per_gpu_batch_size', type=int, default=5, help='Batch size per GPU')
+    parser.add_argument('--inference_timesteps', type=int, default=50, help='Number of inference timesteps')
+    parser.add_argument('--full_epochs', type=int, default=10, help='Total number of epochs')
+    parser.add_argument('--epochs_per_sampling', type=int, default=2, help='Number of training epochs per sampling')
+    parser.add_argument('--samples_per_epoch', type=int, default=100, help='Number of samples per epoch')
+    parser.add_argument('--first_train_step', type=int, default=0, help='First timestep to train on (inclusive)')
+    parser.add_argument('--last_train_step', type=int, default=48, help='Last timestep to train on (inclusive)')
+    parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate for optimizer')
+    
+    args = parser.parse_args()
     
     # Initialize the accelerator
-    accelerator = Accelerator(gradient_accumulation_steps=LAST_TRAIN_STEP - FIRST_TRAIN_STEP + 1)
+    accelerator = Accelerator(gradient_accumulation_steps=args.last_train_step - args.first_train_step + 1)
     device = accelerator.device
     print(f"Using device: {device}")
 
     # Define number of samples and batches per GPU
-    num_samples_per_gpu = SAMPLES_PER_EPOCH // accelerator.num_processes
-    num_batches_per_gpu = num_samples_per_gpu // PER_GPU_BATCH_SIZE
+    num_samples_per_gpu = args.samples_per_epoch // accelerator.num_processes
+    num_batches_per_gpu = num_samples_per_gpu // args.per_gpu_batch_size
 
     # Load the model and scheduler
     scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors = True)
     pretrained_model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
 
     # Define the optimizer
-    optimizer = torch.optim.AdamW(pretrained_model.parameters(), lr=1e-6)
+    optimizer = torch.optim.AdamW(pretrained_model.parameters(), lr=args.learning_rate)
 
     # Prepare the model for DDP
     pretrained_model, optimizer = accelerator.prepare(pretrained_model, optimizer)                   
 
     # Set the timesteps and move the alphas_cumprod to the device
-    scheduler.set_timesteps(INFERENCE_TIMESTEPS, device=device)
+    scheduler.set_timesteps(args.inference_timesteps, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
     # Initialize list to store global rewards for plotting
     global_rewards_history = []
 
-    for epoch in range(FULL_EPOCHS):
+    for epoch in range(args.full_epochs):
         if accelerator.is_main_process:
             print(f"Epoch {epoch}")
 
@@ -165,9 +171,9 @@ if __name__ == "__main__":
         # Generate a batch of images
         batches = []
         all_rewards = []
-        print(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {PER_GPU_BATCH_SIZE}")
+        print(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {args.per_gpu_batch_size}")
         for _ in range(num_batches_per_gpu):
-            latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, PER_GPU_BATCH_SIZE, device)
+            latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, args.per_gpu_batch_size, device)
             
             # Get the rewards
             rewards, scores = reward_function(next_latents[:, -1])
@@ -192,7 +198,7 @@ if __name__ == "__main__":
             global_rewards_history.append(global_mean.item())
             print(f"Epoch {epoch} average reward: {global_mean.item()}")
 
-        for inner_epoch in range(EPOCHS_PER_SAMPLING):
+        for inner_epoch in range(args.epochs_per_sampling):
             for b, batch in enumerate(batches):
                 if accelerator.is_main_process:
                     print(f"Batch {b+1}/{len(batches)}")
@@ -204,7 +210,7 @@ if __name__ == "__main__":
                 advantages = (rewards - global_mean) / global_std
 
                 # Backpropagate accumulating gradients for each timestep within the training range
-                for t in range(FIRST_TRAIN_STEP, LAST_TRAIN_STEP + 1):
+                for t in range(args.first_train_step, args.last_train_step + 1):
                     with accelerator.accumulate(pretrained_model):
                         # Get new likelihoods
                         lat_gpu = latents[:, t].to(device, non_blocking=True)
@@ -212,7 +218,7 @@ if __name__ == "__main__":
                         t_gpu = timesteps[t].to(device, non_blocking=True)
 
                         new_log_probs = rescore_batch(
-                            pretrained_model.module, 
+                            pretrained_model, 
                             scheduler, 
                             lat_gpu, 
                             nxt_gpu, 
@@ -267,9 +273,18 @@ if __name__ == "__main__":
         plt.show()
         print(f"Saved reward plot to global_rewards_plot.png")
 
-    # Save the model
+    # Save the model and arguments
     import time
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     if accelerator.is_main_process:
         model_to_save = accelerator.unwrap_model(pretrained_model)
-        model_to_save.save_pretrained(f"./final_model_{timestamp}") 
+        model_dir = f"./final_model_{timestamp}"
+        model_to_save.save_pretrained(model_dir)
+        
+        # Save the arguments as JSON
+        args_dict = vars(args)
+        with open(f"{model_dir}/training_args.json", "w") as f:
+            json.dump(args_dict, f, indent=2)
+        
+        print(f"Saved model to {model_dir}")
+        print(f"Saved training arguments to {model_dir}/training_args.json")
