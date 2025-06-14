@@ -114,13 +114,15 @@ def check_model_sync(accelerator, model, tol=1e-6):
             print(f"❌ Some params differ by more than ±{tol}")
 
 if __name__ == "__main__":
+    from custom_ddim_scheduler import CustomDDIMScheduler
+    from rewards import reward_function
+    from utils import display_sample
+
+    from accelerate import Accelerator
+    from diffusers import UNet2DModel
+    from tqdm import tqdm
     import argparse
     import json
-    from diffusers import UNet2DModel
-    from custom_ddim_scheduler import CustomDDIMScheduler
-    from utils import display_sample
-    from accelerate import Accelerator
-    from rewards import reward_function
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Fine-tune diffusion model with RL')
@@ -161,62 +163,59 @@ if __name__ == "__main__":
     # Initialize list to store global rewards for plotting
     global_rewards_history = []
 
-    for epoch in range(args.full_epochs):
-        if accelerator.is_main_process:
-            print(f"Epoch {epoch}")
-
-        # Check if models are synced across GPUs
-        check_model_sync(accelerator, pretrained_model)
-
-        # Generate a batch of images
+    for epoch in tqdm(range(args.full_epochs), desc="Training Epochs", disable=not accelerator.is_main_process):
+        # Initialize lists to store rewards and batches
         batches = []
         all_rewards = []
+
+        # Sampling loop
         print(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {args.per_gpu_batch_size}")
         for _ in range(num_batches_per_gpu):
             latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, args.per_gpu_batch_size, device)
             
-            # Get the rewards
+            # Get the rewards in the current GPU
             rewards, scores = reward_function(next_latents[:, -1])
-            print(f"scores={scores}")
             rewards = rewards.to(device)
+
+            # Gather the rewards from all GPUs
             all_batch_rewards = accelerator.gather(rewards)    
             all_rewards.append(all_batch_rewards)
             if accelerator.is_main_process: # only print on the main process
                 print(f"rewards={all_batch_rewards}")
 
+            # Append the batch to the list
             batches.append((latents, next_latents, log_probs, timesteps, rewards))
             torch.cuda.empty_cache()
 
-        # Compute reward avg and std
+        # Compute the reward avg and std in this sampling epoch
         all_rewards = torch.cat(all_rewards)
         global_mean = all_rewards.mean()
         global_std  = all_rewards.std(unbiased=False)
-        print(f"device={device}, global_mean={global_mean}, global_std={global_std}")
 
         # Store the average reward for this epoch
         if accelerator.is_main_process:
             global_rewards_history.append(global_mean.item())
             print(f"Epoch {epoch} average reward: {global_mean.item()}")
 
+        # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
             for b, batch in enumerate(batches):
                 if accelerator.is_main_process:
-                    print(f"Batch {b+1}/{len(batches)}")
+                    print(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
 
                 # Unpack the batch
                 latents, next_latents, log_probs, timesteps, rewards = batch 
                 
-                #Compute the normalized rewards / advantage
+                #Compute the normalized rewards, i.e. advantage
                 advantages = (rewards - global_mean) / global_std
 
-                # Backpropagate accumulating gradients for each timestep within the training range
+                # Accumulate gradients for each timestep of the current batch
                 for t in range(args.first_train_step, args.last_train_step + 1):
                     with accelerator.accumulate(pretrained_model):
                         # Get new likelihoods
                         lat_gpu = latents[:, t].to(device, non_blocking=True)
                         nxt_gpu = next_latents[:, t].to(device, non_blocking=True)
                         t_gpu = timesteps[t].to(device, non_blocking=True)
-
                         new_log_probs = rescore_batch(
                             pretrained_model, 
                             scheduler, 
@@ -241,13 +240,11 @@ if __name__ == "__main__":
                         torch.cuda.empty_cache()
                     
                         # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs 
-                        if accelerator.sync_gradients:
-                            #print(f"({device}) Syncing gradients in timestep {t}")
-                            pass
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
                         torch.cuda.empty_cache()
 
+                # Synchronize the processes
                 torch.cuda.synchronize()
                 accelerator.wait_for_everyone()
 
