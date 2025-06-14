@@ -184,16 +184,21 @@ def evaluate_model(
                     accelerator.gather(scores[k].to(device)).cpu().flatten()
                 )
 
-            imgs = next_latents[:, -1].cpu().permute(0, 2, 3, 1)
-            imgs = (imgs + 1.0) * 127.5
-            imgs = imgs.numpy().astype(np.uint8)
-            for j, arr in enumerate(imgs):
-                img = Image.fromarray(arr)
-                fname = os.path.join(
-                    save_dir, f"rank{accelerator.process_index}_{step:08d}_{i*batch_size+j:05d}.png"
-                )
-                img.save(fname)
-                accelerator.log({f"eval/sample_{accelerator.process_index}_{i*batch_size+j}": wandb.Image(img)}, step=step)
+            # collect the images from all ranks
+            gathered = accelerator.gather(next_latents[:, -1].to(device, non_blocking=True))      
+
+            if accelerator.is_main_process:                            # only rank-0 logs
+                imgs = gathered.cpu().permute(0, 2, 3, 1)
+                imgs = ((imgs + 1.0) * 127.5).numpy().astype(np.uint8)
+
+                wandb_imgs = []
+                for idx, arr in enumerate(imgs):
+                    img = Image.fromarray(arr)
+                    fname = os.path.join(save_dir, f"step_{step:08d}_{idx:05d}.png")
+                    img.save(fname)
+                    wandb_imgs.append(wandb.Image(img))
+
+                accelerator.log({"eval/samples": wandb_imgs}, step=step)
 
         # aggregate & log
         all_rewards = torch.cat(all_rewards)
