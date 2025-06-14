@@ -2,6 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 import torch.distributed as dist
 import wandb
+from accelerate.logging import get_logger
 
 def generate_batch(
     model,   
@@ -119,6 +120,7 @@ if __name__ == "__main__":
     from rewards import reward_function
     from utils import display_sample
 
+    from accelerate.logging import get_logger
     from accelerate import Accelerator
     from diffusers import UNet2DModel
     from tqdm import tqdm
@@ -138,14 +140,16 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # Initialize wandb
-    if accelerator.is_main_process:
-        wandb.init(project="fine-tune-diffusion-models-with-rl", config=args)
+    # Create a logger
+    logger = get_logger(__name__)
 
     # Initialize the accelerator
-    accelerator = Accelerator(gradient_accumulation_steps=args.last_train_step - args.first_train_step + 1)
+    accelerator = Accelerator(gradient_accumulation_steps=args.last_train_step - args.first_train_step + 1, log_with="wandb")
     device = accelerator.device
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
+
+    # Initialize wandb
+    accelerator.init_trackers(project_name="diffusion-finetune", config=args)
 
     # Define number of samples and batches per GPU
     num_samples_per_gpu = args.samples_per_epoch // accelerator.num_processes
@@ -177,7 +181,7 @@ if __name__ == "__main__":
         }
 
         # Sampling loop
-        print(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {args.per_gpu_batch_size}")
+        logger.info(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {args.per_gpu_batch_size}")
         for _ in range(num_batches_per_gpu):
             latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, args.per_gpu_batch_size, device)
             
@@ -195,9 +199,6 @@ if __name__ == "__main__":
                 gathered_metric = accelerator.gather(metric_tensor)
                 all_metrics[k].append(gathered_metric.cpu().flatten())
 
-            if accelerator.is_main_process:
-                print(f"rewards={all_batch_rewards}")
-
             # Append the batch to the list
             batches.append((latents, next_latents, log_probs, timesteps, rewards))
             torch.cuda.empty_cache()
@@ -209,7 +210,7 @@ if __name__ == "__main__":
 
         # Log the metrics for this epoch
         if accelerator.is_main_process:
-            print(f"Epoch {epoch} average reward: {global_mean.item()}")
+            logger.info(f"Average reward: {global_mean.item()}")
 
             # Concatenate and compute mean for each metric
             metrics_to_log = {'train/reward': global_mean.item(), 'train/reward_std': global_std.item()}
@@ -218,13 +219,14 @@ if __name__ == "__main__":
                     all_values = torch.cat(all_metrics[k])
                     metrics_to_log[f"train/{k}"] = all_values.float().mean().item()
                     metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
-            wandb.log(metrics_to_log, step=epoch)
+                    logger.info(f"Average {k}: {metrics_to_log[f'train/{k}']}")
+            accelerator.log(metrics_to_log, step=epoch)
 
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
             for b, batch in enumerate(batches):
                 if accelerator.is_main_process:
-                    print(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
+                    logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
 
                 # Unpack the batch
                 latents, next_latents, log_probs, timesteps, rewards = batch 
@@ -287,5 +289,5 @@ if __name__ == "__main__":
         with open(f"{model_dir}/training_args.json", "w") as f:
             json.dump(args_dict, f, indent=2)
         
-        print(f"Saved model to {model_dir}")
-        print(f"Saved training arguments to {model_dir}/training_args.json")
+        logger.info(f"Saved model to {model_dir}")
+        logger.info(f"Saved training arguments to {model_dir}/training_args.json")
