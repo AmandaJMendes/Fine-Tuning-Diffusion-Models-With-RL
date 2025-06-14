@@ -1,6 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
 import torch.distributed as dist
+import wandb
 
 def generate_batch(
     model,   
@@ -137,6 +138,10 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
+    # Initialize wandb
+    if accelerator.is_main_process:
+        wandb.init(project="fine-tune-diffusion-models-with-rl", config=args)
+
     # Initialize the accelerator
     accelerator = Accelerator(gradient_accumulation_steps=args.last_train_step - args.first_train_step + 1)
     device = accelerator.device
@@ -160,13 +165,16 @@ if __name__ == "__main__":
     scheduler.set_timesteps(args.inference_timesteps, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
-    # Initialize list to store global rewards for plotting
-    global_rewards_history = []
-
     for epoch in tqdm(range(args.full_epochs), desc="Training Epochs", disable=not accelerator.is_main_process):
         # Initialize lists to store rewards and batches
         batches = []
         all_rewards = []
+        all_metrics = {
+            'ir_person': [],
+            'sex_score': [],
+            'sex_score_binary': [],
+            'aesthetics_score': [],
+        }
 
         # Sampling loop
         print(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {args.per_gpu_batch_size}")
@@ -177,10 +185,17 @@ if __name__ == "__main__":
             rewards, scores = reward_function(next_latents[:, -1])
             rewards = rewards.to(device)
 
-            # Gather the rewards from all GPUs
-            all_batch_rewards = accelerator.gather(rewards)    
+            # Gather the rewards and metrics from all GPUs
+            all_batch_rewards = accelerator.gather(rewards)
             all_rewards.append(all_batch_rewards)
-            if accelerator.is_main_process: # only print on the main process
+
+            # Gather and store metrics from all GPUs
+            for k in all_metrics:
+                metric_tensor = scores[k].to(device)
+                gathered_metric = accelerator.gather(metric_tensor)
+                all_metrics[k].append(gathered_metric.cpu().flatten())
+
+            if accelerator.is_main_process:
                 print(f"rewards={all_batch_rewards}")
 
             # Append the batch to the list
@@ -192,10 +207,18 @@ if __name__ == "__main__":
         global_mean = all_rewards.mean()
         global_std  = all_rewards.std(unbiased=False)
 
-        # Store the average reward for this epoch
+        # Log the metrics for this epoch
         if accelerator.is_main_process:
-            global_rewards_history.append(global_mean.item())
             print(f"Epoch {epoch} average reward: {global_mean.item()}")
+
+            # Concatenate and compute mean for each metric
+            metrics_to_log = {'train/reward': global_mean.item(), 'train/reward_std': global_std.item()}
+            for k in all_metrics:
+                if all_metrics[k]:  # list of tensors
+                    all_values = torch.cat(all_metrics[k])
+                    metrics_to_log[f"train/{k}"] = all_values.float().mean().item()
+                    metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
+            wandb.log(metrics_to_log, step=epoch)
 
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
@@ -250,25 +273,6 @@ if __name__ == "__main__":
 
     # Check if models are synced across GPUs
     check_model_sync(accelerator, pretrained_model)
-
-    # Save some samples
-    print(f"Saving {num_samples_per_gpu} samples in device {device}")
-    latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, num_samples_per_gpu, device)
-    
-    for i in range(num_samples_per_gpu):
-        display_sample(next_latents[i:i+1, -1], f"Device {device} Final sample {i}")
-
-    # Plot the global rewards history
-    if accelerator.is_main_process and global_rewards_history:
-        plt.figure(figsize=(10, 6))
-        plt.plot(range(len(global_rewards_history)), global_rewards_history, 'b-', linewidth=2)
-        plt.xlabel('Epoch')
-        plt.ylabel('Average Global Reward')
-        plt.title('Global Reward Progress During Training')
-        plt.grid(True, alpha=0.3)
-        plt.savefig('global_rewards_plot.png', dpi=300, bbox_inches='tight')
-        plt.show()
-        print(f"Saved reward plot to global_rewards_plot.png")
 
     # Save the model and arguments
     import time
