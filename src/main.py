@@ -169,7 +169,7 @@ def evaluate_model(
 
         for i in range(num_batches):
             # private generator = no impact on global RNG
-            gen = torch.Generator(device=device).manual_seed(fixed_seed + i)
+            gen = torch.Generator(device=device).manual_seed(fixed_seed + i + accelerator.process_index)
 
             latents, next_latents, _, _ = generate_batch(
                 model, scheduler, batch_size, device=device, generator=gen
