@@ -5,33 +5,49 @@ from accelerate.logging import get_logger
 from accelerate import Accelerator
 from diffusers import UNet2DModel
 from tqdm import tqdm
+from PIL import Image
 
 import torch.distributed as dist
+import numpy as np
 import argparse
 import logging
 import torch
+import wandb
 import json
 import math
+import os
 
 def generate_batch(
     model,   
     scheduler,
     batch_size: int,  
-    device="cuda:0"
+    device="cuda:0",
+    generator: torch.Generator | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Generate a batch of images from the model.
+
+    Args:
+        model:       diffusion network
+        scheduler:   DDIM scheduler
+        batch_size:  number of samples in the batch
+        device:      device on which to place the tensors
+        generator:   optional private RNG (keeps global RNG untouched)  # NEW
     Returns:
-        latents: shape (B, T, C, H, W)
-        next_latents: shape (B, T, C, H, W)
-        log_probs: shape (B, T)
-        timesteps: shape (T)
+        latents:      (B, T, C, H, W)
+        next_latents: (B, T, C, H, W)
+        log_probs:    (B, T)
+        timesteps:    (T,)
     """
 
     # Start from pure noise
     n_channels = model.config.in_channels
     image_size = model.config.sample_size
-    latents = torch.randn((batch_size, n_channels, image_size, image_size), device=device)
+    latents = torch.randn(
+        (batch_size, n_channels, image_size, image_size),
+        device=device,
+        generator=generator
+    )
 
     # Initialize the arrays
     log_probs_list = [] #shape: (T, B)
@@ -50,7 +66,7 @@ def generate_batch(
             pred_noise = model(latents, t).sample
 
             # Step the scheduler to get the next latents
-            scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=1.0)
+            scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=1.0, generator=generator)
             latents = scheduler_output.prev_sample
 
         # Append the log_prob and new latents to the lists
@@ -124,6 +140,80 @@ def check_model_sync(accelerator, model, tol=1e-6):
         else:
             print(f"❌ Some params differ by more than ±{tol}")
 
+def evaluate_model(
+    step: int,
+    model: UNet2DModel,
+    scheduler: CustomDDIMScheduler,
+    num_samples: int,
+    batch_size: int,
+    device: torch.device,
+    accelerator: Accelerator,
+    fixed_seed: int = 1234,
+    save_dir: str = "eval_images",
+):
+    """
+    Deterministic evaluation that does not touch the global RNG
+    (→ training randomness proceeds as usual).
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    was_training = model.training
+    model.eval()
+
+    with torch.no_grad():
+        num_batches = math.ceil(num_samples / (batch_size * accelerator.num_processes))
+        all_rewards = []
+        all_metrics = {k: [] for k in [
+            'ir_person', 'sex_score', 'sex_score_binary', 'aesthetics_score'
+        ]}
+
+        for i in range(num_batches):
+            # private generator = no impact on global RNG
+            gen = torch.Generator(device=device).manual_seed(fixed_seed + i)
+
+            latents, next_latents, _, _ = generate_batch(
+                model, scheduler, batch_size, device=device, generator=gen
+            )
+
+            rewards, scores = reward_function(next_latents[:, -1])
+            rewards = rewards.to(device)
+
+            all_rewards.append(accelerator.gather(rewards))
+            for k in all_metrics:
+                all_metrics[k].append(
+                    accelerator.gather(scores[k].to(device)).cpu().flatten()
+                )
+
+            imgs = next_latents[:, -1].cpu().permute(0, 2, 3, 1)
+            imgs = (imgs + 1.0) * 127.5
+            imgs = imgs.numpy().astype(np.uint8)
+            for j, arr in enumerate(imgs):
+                img = Image.fromarray(arr)
+                fname = os.path.join(
+                    save_dir, f"rank{accelerator.rank}_{step:08d}_{i*batch_size+j:05d}.png"
+                )
+                img.save(fname)
+                accelerator.log({f"eval/sample_{accelerator.process_index}_{i*batch_size+j}": wandb.Image(img)}, step=step)
+
+        # aggregate & log
+        all_rewards = torch.cat(all_rewards)
+        metrics = {
+            "eval/reward":     all_rewards.mean().item(),
+            "eval/reward_std": all_rewards.std(unbiased=False).item(),
+        }
+        for k, v in all_metrics.items():
+            vals = torch.cat(v).float()
+            metrics[f"eval/{k}"]     = vals.mean().item()
+            metrics[f"eval/{k}_std"] = vals.std().item()
+
+        if accelerator.is_main_process:
+            accelerator.log(metrics, step=step)
+
+    if was_training:
+        model.train()
+
+    torch.cuda.empty_cache()
+
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Fine-tune diffusion model with RL')
@@ -135,7 +225,8 @@ if __name__ == "__main__":
     parser.add_argument('--first_train_step', type=int, default=0, help='First timestep to train on (inclusive)')
     parser.add_argument('--last_train_step', type=int, default=48, help='Last timestep to train on (inclusive)')
     parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate for optimizer')
-    
+    parser.add_argument('--eval_every_steps', type=int, default=20, help='Run evaluation every N optimiser steps')
+    parser.add_argument('--eval_samples', type=int, default=20, help='Total #samples drawn in each evaluation')
     args = parser.parse_args()
     
     # Create a logger
@@ -167,6 +258,22 @@ if __name__ == "__main__":
     scheduler.set_timesteps(args.inference_timesteps, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
+    # Initialize the optimiation steps
+    global_step = 0
+
+    # Evaluate model before fine-tuning
+    logger.info("Evaluating model before fine-tuning")
+    evaluate_model(
+        step=global_step,
+        model=pretrained_model.module,
+        scheduler=scheduler,
+        num_samples=args.eval_samples,
+        batch_size=args.per_gpu_batch_size,
+        device=device,
+        accelerator=accelerator
+    )
+
+    # Sampling + Optimization loop
     for epoch in tqdm(range(args.full_epochs), desc="Training Epochs", disable=not accelerator.is_main_process):
         # Initialize lists to store rewards and batches
         batches = []
@@ -217,7 +324,7 @@ if __name__ == "__main__":
                     metrics_to_log[f"train/{k}"] = all_values.float().mean().item()
                     metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
                     logger.info(f"Average {k}: {metrics_to_log[f'train/{k}']}")
-            accelerator.log(metrics_to_log, step=epoch)
+            accelerator.log(metrics_to_log)
 
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
@@ -264,6 +371,21 @@ if __name__ == "__main__":
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
                         torch.cuda.empty_cache()
+
+                        # Update the global step
+                        if accelerator.sync_gradients:
+                            global_step += 1
+                            if global_step % args.eval_every_steps == 0:
+                                logger.info(f"Evaluating model at step {global_step}")
+                                evaluate_model(
+                                    step=global_step,
+                                    model=pretrained_model.module,
+                                    scheduler=scheduler,
+                                    num_samples=args.eval_samples,
+                                    batch_size=args.per_gpu_batch_size,
+                                    device=device,
+                                    accelerator=accelerator
+                                )
 
                 # Synchronize the processes
                 torch.cuda.synchronize()
