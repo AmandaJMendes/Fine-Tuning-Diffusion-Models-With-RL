@@ -190,7 +190,7 @@ def evaluate_model(
             for j, arr in enumerate(imgs):
                 img = Image.fromarray(arr)
                 fname = os.path.join(
-                    save_dir, f"rank{accelerator.rank}_{step:08d}_{i*batch_size+j:05d}.png"
+                    save_dir, f"rank{accelerator.process_index}_{step:08d}_{i*batch_size+j:05d}.png"
                 )
                 img.save(fname)
                 accelerator.log({f"eval/sample_{accelerator.process_index}_{i*batch_size+j}": wandb.Image(img)}, step=step)
