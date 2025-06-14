@@ -1,8 +1,15 @@
-import torch
-import matplotlib.pyplot as plt
-import torch.distributed as dist
-import wandb
+from custom_ddim_scheduler import CustomDDIMScheduler
+from rewards import reward_function
+
 from accelerate.logging import get_logger
+from accelerate import Accelerator
+from diffusers import UNet2DModel
+from tqdm import tqdm
+
+import torch.distributed as dist
+import argparse
+import torch
+import json
 
 def generate_batch(
     model,   
@@ -116,17 +123,6 @@ def check_model_sync(accelerator, model, tol=1e-6):
             print(f"❌ Some params differ by more than ±{tol}")
 
 if __name__ == "__main__":
-    from custom_ddim_scheduler import CustomDDIMScheduler
-    from rewards import reward_function
-    from utils import display_sample
-
-    from accelerate.logging import get_logger
-    from accelerate import Accelerator
-    from diffusers import UNet2DModel
-    from tqdm import tqdm
-    import argparse
-    import json
-
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Fine-tune diffusion model with RL')
     parser.add_argument('--per_gpu_batch_size', type=int, default=5, help='Batch size per GPU')
