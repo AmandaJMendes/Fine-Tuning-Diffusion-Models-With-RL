@@ -8,8 +8,10 @@ from tqdm import tqdm
 
 import torch.distributed as dist
 import argparse
+import logging
 import torch
 import json
+import math
 
 def generate_batch(
     model,   
@@ -137,7 +139,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Create a logger
-    logger = get_logger(__name__)
+    logger = get_logger(__name__, log_level="INFO")
+    logging.basicConfig(level=logging.INFO) 
 
     # Initialize the accelerator
     accelerator = Accelerator(gradient_accumulation_steps=args.last_train_step - args.first_train_step + 1, log_with="wandb")
@@ -148,8 +151,7 @@ if __name__ == "__main__":
     accelerator.init_trackers(project_name="diffusion-finetune", config=args)
 
     # Define number of samples and batches per GPU
-    num_samples_per_gpu = args.samples_per_epoch // accelerator.num_processes
-    num_batches_per_gpu = num_samples_per_gpu // args.per_gpu_batch_size
+    num_batches_per_gpu = math.ceil(args.samples_per_epoch / (args.per_gpu_batch_size * accelerator.num_processes))
 
     # Load the model and scheduler
     scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors = True)
@@ -177,8 +179,7 @@ if __name__ == "__main__":
         }
 
         # Sampling loop
-        logger.info(f"Generating {num_samples_per_gpu} samples in {num_batches_per_gpu} batches of size {args.per_gpu_batch_size}")
-        for _ in range(num_batches_per_gpu):
+        for _ in tqdm(range(num_batches_per_gpu), desc=f"Generating batches of size {args.per_gpu_batch_size}", disable=not accelerator.is_main_process):
             latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, args.per_gpu_batch_size, device)
             
             # Get the rewards in the current GPU
@@ -221,8 +222,7 @@ if __name__ == "__main__":
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
             for b, batch in enumerate(batches):
-                if accelerator.is_main_process:
-                    logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
+                logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
 
                 # Unpack the batch
                 latents, next_latents, log_probs, timesteps, rewards = batch 
