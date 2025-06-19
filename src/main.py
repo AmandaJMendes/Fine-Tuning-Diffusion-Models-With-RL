@@ -229,6 +229,7 @@ if __name__ == "__main__":
     parser.add_argument('--samples_per_epoch', type=int, default=100, help='Number of samples per epoch')
     parser.add_argument('--first_train_step', type=int, default=0, help='First timestep to train on (inclusive)')
     parser.add_argument('--last_train_step', type=int, default=48, help='Last timestep to train on (inclusive)')
+    parser.add_argument('--num_train_timesteps', type=int, default=None, help='Number of timesteps to uniformly sample for training (default: use all timesteps in range)')
     parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate for optimizer')
     parser.add_argument('--eval_every_steps', type=int, default=20, help='Run evaluation every N optimiser steps')
     parser.add_argument('--eval_samples', type=int, default=20, help='Total #samples drawn in each evaluation')
@@ -333,6 +334,17 @@ if __name__ == "__main__":
 
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
+            
+            # Sample timesteps for this epoch
+            if args.num_train_timesteps is None:
+                # Use all timesteps in the range
+                train_timesteps = list(range(args.first_train_step, args.last_train_step + 1))
+            else:
+                # Uniformly sample K timesteps from the range
+                all_timesteps = list(range(args.first_train_step, args.last_train_step + 1))
+                train_timesteps = torch.randperm(len(all_timesteps))[:args.num_train_timesteps].tolist()
+                train_timesteps = [all_timesteps[i] for i in train_timesteps]
+
             for b, batch in enumerate(batches):
                 logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
 
@@ -342,8 +354,8 @@ if __name__ == "__main__":
                 #Compute the normalized rewards, i.e. advantage
                 advantages = (rewards - global_mean) / global_std
 
-                # Accumulate gradients for each timestep of the current batch
-                for t in range(args.first_train_step, args.last_train_step + 1):
+                # Accumulate gradients for each selected timestep of the current batch
+                for t in train_timesteps:
                     with accelerator.accumulate(pretrained_model):
                         # Get new likelihoods
                         lat_gpu = latents[:, t].to(device, non_blocking=True)
