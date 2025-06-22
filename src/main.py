@@ -241,6 +241,14 @@ if __name__ == "__main__":
 
     # Initialize the accelerator
     accelerator = Accelerator(gradient_accumulation_steps=args.last_train_step - args.first_train_step + 1, log_with="wandb")
+    # Calculate gradient accumulation steps based on training timesteps
+    if args.num_train_timesteps is not None:
+        gradient_accumulation_steps = min(args.num_train_timesteps, args.last_train_step - args.first_train_step + 1)
+    else:
+        gradient_accumulation_steps = args.last_train_step - args.first_train_step + 1
+    
+    # Re-initialize accelerator with correct gradient accumulation steps
+    accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps, log_with="wandb")
     device = accelerator.device
     logger.info(f"Using device: {device}")
 
