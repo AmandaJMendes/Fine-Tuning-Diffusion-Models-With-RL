@@ -1,30 +1,38 @@
-Justification
+Background
 
-Generative diffusion models (e.g. Stable Diffusion, DALL-E 2) have achieved remarkable image synthesis results, but their out-of-the-box outputs often fail to fully align with human preferences and intent. This misalignment can manifest in various ways: the models may produce images of suboptimal quality or content that reflects implicit biases from their training data, leading to results that are not ethically aligned or not in line with user expectations. In other words, despite high overall fidelity, a diffusion model’s samples can be undesirably biased or misaligned with what users actually want. Fine-tuning these models for specific downstream objectives is therefore crucial. For instance, one might wish to debias a model so it produces fairer, more inclusive outputs, or to tailor a model’s image outputs to better match human aesthetic preferences and other qualitative criteria beyond simple realism.
+- Diffusion models
+ - DDPM (Discrete diffusion)
+ - Forward and backward pass
+ - Training loss (lower bound, etc)
+ - Sampling 
+- MDP and RL
+- Policy gradient methods
 
-While prompt engineering and supervised fine-tuning can partially steer diffusion models toward desired properties, they often struggle with goals that are underspecified, compositional, or not well-represented in the training data. Prompting is constrained by the latent knowledge encoded during pretraining, and supervised fine-tuning typically requires curated datasets that may not exist for complex or subjective tasks. In contrast, reinforcement learning (RL) offers a framework to directly optimize these downstream objectives using a reward signal — which can come from models, metrics, or human feedback — even when no ground-truth data is available.
 
-One common alternative to RL is reward-weighted regression (RWR) or reward-weighted fine-tuning, where the model is updated on samples it generates, weighted by a reward function (e.g., aesthetic score or preference predictor). This strategy has the appeal of being simple to implement and compatible with standard supervised learning pipelines. However, it also has critical limitations: it does not model the sequential nature of the diffusion process, and it relies on an approximate objective based on a variational bound rather than the true reward. This can lead to inefficient credit assignment, where only final outputs are rewarded without addressing which specific denoising steps contributed to success or failure. As a result, performance plateaus or regresses when attempting to optimize complex, high-level properties such as human alignment or fairness. Empirical comparisons in the DDPO paper have shown that RWR-based methods tend to underperform even when multiple iterations are used, especially when compared to full policy gradient approaches.
+Problem statement
 
-Recent research has identified RL as a powerful tool for tackling these alignment and fine-tuning challenges. In large language models (LLMs), RL-based fine-tuning – especially Reinforcement Learning from Human Feedback (RLHF) – has proven remarkably effective at aligning models with human preferences. Notably, RLHF is a key ingredient in training instruction-following AI systems like ChatGPT, enabling language models to produce helpful and human-aligned responses. This success has spurred interest in applying RL to other generative models. Follow-up efforts such as DeepSeek-R1 highlight the potential of RL to endow LLMs with new capabilities: for example, DeepSeek-R1-Zero demonstrated that an LLM can learn complex reasoning behaviors purely through large-scale RL fine-tuning (without any supervised pre-training).
+- Intro: Policy gradient method rely on exact likelihoods. In diffusion models, the exact likelihood is intractable 
+- So we frame the denoising as a MDP
+- At each step, we can use the exact likelihoods at each denoising step in place of the approximate likelihoods induced by a full denoising process, and use policy gradient methods (RL) for parameterizing/optimizing the MDP policy
+- Also, we consider that in policy gradient methods we can sample some steps along the episodes and keep an unbiased estimator, need to prove that. In the formulation, leave the sampler generic, this is part of the statement
+- The goal is to determine the sampler, it is generic, so it could be something that samples all the timesteps for instance. 
+- The final problem statement considers the reinforce loss but with the generic sampler included
 
-By extending RL-based fine-tuning to diffusion models for image generation, researchers aim to achieve similar benefits in the vision domain. While still relatively underexplored in the context of diffusion models compared to its wide adoption in large language models, recent works have begun to demonstrate that RL is a feasible and promising strategy for fine-tuning diffusion models on downstream tasks that are otherwise difficult to capture through conventional methods. For example, Black et al. (2023) propose Denoising Diffusion Policy Optimization (DDPO), reframing the diffusion sampling process as a multi-step decision-making task solvable by policy gradient RL. Empirically, DDPO was able to adapt a text-to-image diffusion model (Stable Diffusion) to optimize objectives that are difficult to express via prompting, such as image compressibility, as well as objectives derived from human feedback like aesthetic image quality. The same approach also improved prompt-image alignment using feedback from a vision-language model, all without requiring additional human-annotated data.
 
-Beyond these initial cases, subsequent studies have reinforced the appeal of RL fine-tuning for diffusion models by documenting various benefits. Notably, Fan et al. (2023) introduce an RL fine-tuning method with KL-regularized policy updates (termed DPOK), and show that RL-trained diffusion models can surpass traditional supervised fine-tuning in both image-text alignment and overall image quality. Another large-scale study by Zhang et al. (2024) demonstrates that RL can be scaled up to fine-tune diffusion models on millions of images with a variety of reward functions (for human preference alignment, compositional accuracy, and fairness). In that study, human testers significantly preferred the RL-tuned model’s outputs (about 80% preference rate) over the original model’s outputs, while also noting improvements in diversity and compositional correctness.
+Related Works
 
-However, it must be noted that applying RL to fine-tune diffusion models remains a nascent and technically demanding endeavor. Unlike autoregressive models, diffusion models rely on iterative denoising and lack the simple factorization of output sequences that many RL algorithms (like PPO or GRPO) depend on. This makes it difficult to directly compute log-probabilities or KL divergences over output sequences, which are critical components of stable and efficient RL training. Furthermore, the multi-step nature of diffusion sampling implies that every forward pass can be computationally expensive, and evaluating reward functions often requires full image generation. Recent works in diffusion-based LLMs (such as d1-LLaDA) have shown that adapting RL to the diffusion setting requires specialized estimators (e.g. random prompt masking, approximate likelihoods) to avoid high compute costs and unstable gradients. Even with such techniques, policy updates remain more fragile, sample generation is slower, and the efficiency gap with AR models persists. These challenges are compounded when scaling to high-resolution image generation, where latency and resource usage are even more pronounced. As such, the research community continues to explore methods that improve training stability, estimator accuracy, and compute efficiency for RL in diffusion models, with the hope of matching the effectiveness of RLHF in language while overcoming the unique barriers posed by diffusion architectures.
+- Finetuning diffusion models
+ - Other methods that are not reward-based
+ - Using reward-based finetuning
+  - SFT
+  - Direct backprop
+  - Policy gradient
+- Non-uniform timestep 
+ - Weighting
+ - Sampling
+  - Fixed distribution
+  - Adaptative distribution 
 
-Objectives
 
-Building on the above motivation, this thesis sets out the following research objectives, structured as key questions and aims:
 
-Adapt and evaluate RL fine-tuning methods for diffusion models: How can existing reinforcement learning techniques (inspired by RLHF and recent algorithms like DDPO/DPOK) be effectively applied to text-to-image diffusion models? This involves implementing or extending these RL-based fine-tuning approaches on diffusion frameworks and assessing their performance in aligning image generation with specific target objectives (e.g. human aesthetic preferences, reduced bias, or enhanced prompt adherence).
-
-Analyze and interpret the training dynamics of RL-based fine-tuning for diffusion models: What are the internal behaviors and mechanisms driving the optimization process during RL fine-tuning? This includes investigating the contribution of each loss component, examining the gradients at various denoising steps, and comparing the behavior and convergence of different policy gradient methods. The aim is to gain a deep understanding of how RL signals propagate through the diffusion process, how model updates influence sample quality, and whether any inefficiencies or instabilities arise during training. Such insights are critical for improving robustness, interpretability, and sample efficiency in future applications of RL for diffusion.
-
-Address the challenge of likelihood approximation in diffusion models: Unlike in LLMs, where the likelihood of a generated sample can be directly computed and optimized, diffusion models do not permit direct computation of sample likelihoods due to their non-autoregressive, multi-step nature. This introduces a key challenge for RL-based fine-tuning. Therefore, one objective of this thesis is to explore efficient and accurate methods for approximating likelihoods and gradients in diffusion models. This includes evaluating strategies such as mean-field approximations, prompt masking, and other estimator designs. A special focus will be placed on understanding whether all diffusion steps contribute equally to the final output and whether selective training on key timesteps could reduce computational burden without harming alignment or performance.
-
-Improve efficiency and effectiveness of RL fine-tuning for diffusion: Based on the findings, explore and develop strategies to make RL-based fine-tuning more efficient and robust for diffusion models. The aim is to narrow the gap between RL fine-tuning in vision and in language domains. This may involve researching better reward formulations, algorithmic improvements (e.g. off-policy data reuse or KL-regularized optimization), and overall system optimizations. The goal is to enable practical, scalable RL-based alignment for diffusion models.
-
-Each of these objectives will be pursued through rigorous experimentation and analysis. Collectively, they aim to advance our understanding of how reinforcement learning can be harnessed to fine-tune diffusion-based generative models, both by demonstrating its benefits on image generation tasks and by uncovering ways to overcome the current inefficiencies.
 
