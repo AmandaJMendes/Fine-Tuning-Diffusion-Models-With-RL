@@ -7,8 +7,10 @@ from diffusers import UNet2DModel
 from tqdm import tqdm
 from PIL import Image
 
+
 import torch.distributed as dist
 import numpy as np
+import contextlib
 import argparse
 import logging
 import torch
@@ -16,6 +18,51 @@ import wandb
 import json
 import math
 import os
+
+@contextlib.contextmanager
+def capture_grad_moments(model, accelerator):
+    """
+    Logs per-backward grad statistics without extra allocations.
+    Returns a dict on rank-0, None on other ranks.
+    """
+    model = accelerator.unwrap_model(model)
+
+    N = S = Q = 0.0                       # Python floats
+
+    def _hook(grad):
+        nonlocal N, S, Q
+        g = grad.detach()
+        N += g.numel()
+        S += g.sum().item()               # 1 scalar cpu-side
+        Q += (g * g).sum().item()
+
+    handles = [p.register_hook(_hook) for p in model.parameters()]
+    try:
+        yield
+    finally:
+        for h in handles:
+            h.remove()
+
+        # --- all-reduce three scalars ---
+        for name, val in zip(("N", "S", "Q"), (N, S, Q)):
+            t = torch.tensor(val, device=accelerator.device)
+            accelerator.reduce(t, reduction="sum")
+            locals()[name] = t.item()     # overwrite N, S, Q
+
+        if accelerator.is_main_process:
+            if N == 0:
+                stats = dict(N=0, mean=0.0, var=0.0, std=0.0)
+            else:
+                mu  = S / N
+                var = max(Q / N - mu * mu, 0.0)
+                stats = dict(N=N, mean=mu, var=var, std=math.sqrt(var))
+        else:
+            stats = None
+
+        # expose result to caller
+        object.__setattr__(capture_grad_moments, "result", stats)
+
+
 
 def generate_batch(
     model,   
@@ -338,7 +385,7 @@ if __name__ == "__main__":
                     metrics_to_log[f"train/{k}"] = all_values.float().mean().item()
                     metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
                     logger.info(f"Average {k}: {metrics_to_log[f'train/{k}']}")
-            accelerator.log(metrics_to_log)
+            accelerator.log(metrics_to_log, step=global_step)
 
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
@@ -388,7 +435,19 @@ if __name__ == "__main__":
                         loss = -loss_clip.mean()
 
                         # Backpropagate and clear the cache
-                        accelerator.backward(loss)
+                        with capture_grad_moments(pretrained_model, accelerator):
+                            accelerator.backward(loss)
+
+                        # Log gradient info 
+                        if accelerator.is_main_process:
+                            stats = capture_grad_moments.result   # dict with N, mean, var, std
+                            accelerator.log({
+                                f"grad_inc_norm/t={t}": stats["std"] * math.sqrt(stats["N"]),
+                                f"grad_inc_mean/t={t}": stats["mean"],
+                                f"grad_inc_std/t={t}":  stats["std"],
+                            }, step=global_step)
+
+                        # Free up memory
                         del lat_gpu, nxt_gpu, t_gpu, loss, new_log_probs, importance_ratio, clipped_ratio
                         torch.cuda.empty_cache()
                     
