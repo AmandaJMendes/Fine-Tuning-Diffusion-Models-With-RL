@@ -1,5 +1,5 @@
-from custom_ddim_scheduler import CustomDDIMScheduler
-from rewards import reward_function
+from .custom_ddim_scheduler import CustomDDIMScheduler
+from .rewards import reward_function
 
 from accelerate.logging import get_logger
 from accelerate import Accelerator
