@@ -147,3 +147,9 @@ A(x_0, c) = \frac{r(x_0, c) - \mu}{\sigma},
 \label{eq:advantage-definition}
 \end{equation}
 where \( \mu \) and \( \sigma \) are the running mean and standard deviation of observed rewards. This standardization ensures that reward magnitudes are well-scaled across training, which helps mitigate exploding or vanishing gradients.
+
+
+
+To evaluate the practical effects of fine-tuning on model behavior, we measured the proportion of male-presenting images generated throughout training using a fixed classification threshold (as described in Section~\ref{sec:reward_functions_used}). Figure~\ref{fig:binary_gender_ratio} shows the evolution of this ratio across training iterations for different sampling strategies. All runs begin with approximately 20 to 30\% male-presenting samples, reflecting the gender imbalance inherent to the pretrained model. 
+
+We further illustrate this effect in Figure~\ref{fig:sample_evolution}, which shows samples generated from a fixed random seed at different stages of training. By holding the seed constant, both the initial noise and the sequence of stochastic sampling decisions remain fixed across checkpoints, ensuring that differences in the outputs reflect only the effect of model updates.  The visual progression highlights how fine-tuning drive changes in the outputs: initial generations reflect the bias of the pretrained model, while later ones increasingly depict male-presenting individuals with improved visual quality. This qualitative trajectory reinforces the effectiveness of reward-aligned fine-tuning.
