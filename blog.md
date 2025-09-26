@@ -126,3 +126,24 @@ To provide a concise reference, Table~\ref{tab:hyperparams_structured} summarize
   %\fonte{Produced by the author.}
 \end{table}
 
+\section{PPO: Clipped Objective and Advantage Normalization}
+
+PPO is utilized to improve the stability and sample efficiency of the policy gradient updates. It achieves this by constraining the magnitude of policy changes during training and allowing for off-policy updates.
+
+
+PPO constrains the magnitude of policy updates via a probability ratio that compares the new and old policies:
+
+\begin{equation}
+r_t(\theta) = \frac{\pi_\theta(x_{t-1} \mid x_t, c)}{\pi_{\theta_{\text{old}}}(x_{t-1} \mid x_t, c)}
+\label{eq:importance-ratio}
+\end{equation}
+
+This ratio measures the change in likelihood of each action (i.e., denoising step) under the updated policy relative to the one that generated the data. To prevent excessively large updates that could degrade performance, PPO applies a clipping function to this ratio, limiting it to a small interval around 1.
+
+To further stabilize training, we replace the raw reward with a normalized advantage:
+
+\begin{equation}
+A(x_0, c) = \frac{r(x_0, c) - \mu}{\sigma}, 
+\label{eq:advantage-definition}
+\end{equation}
+where \( \mu \) and \( \sigma \) are the running mean and standard deviation of observed rewards. This standardization ensures that reward magnitudes are well-scaled across training, which helps mitigate exploding or vanishing gradients.
