@@ -39,3 +39,90 @@ where $\tau = (x_T, x_{T-1}, \ldots, x_0)$ denotes the trajectory of noisy image
 
 
 
+
+\subsection{Hardware Setup}
+All experiments were conducted on a single machine equipped with four NVIDIA T4 GPUs. To efficiently utilize the available computational resources and manage the memory requirements of diffusion model training, we employed data parallelism. This approach involves distributing the batch of input data across all available GPUs. Each GPU processes a subset of the batch independently, computes its local gradients, and then these gradients are aggregated and synchronized across all GPUs to perform a single optimizer step. This parallelization strategy significantly accelerates the training process by allowing simultaneous computation, making it feasible to fine-tune large diffusion models within a reasonable timeframe. However, the available 16GB memory per T4 GPU currently limits the maximum effective batch size we can use. For future experiments, the hardware setup will be extended to include GPUs with larger memory capacities, which will enable the use of larger batch sizes, further shorten training times, and allow for experiments to be conducted at a larger scale.
+
+\subsection{Pretrained Model} 
+We employ the publicly available diffusion model \texttt{google/ddpm-celebahq-256} \cite{pretrained_model} as the policy initialization for fine-tuning. This model was trained on the CelebA-HQ dataset \cite{celeba_hq}, a high-resolution subset of the CelebA dataset consisting of 30,000 facial images at \(1024 \times 1024\) resolution. CelebA-HQ preserves the attribute richness of the original CelebA dataset—such as age, gender, and hairstyle—while enhancing image quality. CelebA itself contains over 200,000 celebrity images. The dataset spans a diverse set of identities and includes variations in pose, lighting, and background, making it a widely adopted benchmark for generative modeling of faces.
+
+Although the CelebA-HQ dataset provides images at \(1024 \times 1024\), the model was trained on downsampled versions at \(256 \times 256\), which is also the resolution used in our experiments. The model follows the DDPM framework and uses a U-Net architecture trained to predict the noise component \( \epsilon \) added during the forward diffusion process.
+
+In this preliminary stage, we focus on unconditional generation and use the model in its original form, without any conditioning inputs. While our general formulation remains compatible with conditional diffusion models through the inclusion of a context variable \(c\), this simplification does not affect the mathematical structure of our approach.
+
+Empirically, we observed that the model exhibits a strong demographic bias: when sampling unconditionally, the majority of generated images, approximately 78\%, depict women. This observation reflects imbalances in the underlying model pretrained on the CelebA-HQ dataset and highlights the importance of addressing such biases in downstream applications.
+
+
+\subsection{Scheduler}
+We employ a Denoising Diffusion Implicit Model (DDIM) scheduler \cite{ddim} to perform the reverse sampling process during training and inference. While the original DDPM formulation defines a purely stochastic Markov chain for this reverse process, DDIM introduces a more generalized framework that offers significant practical advantages within the diffusion modeling landscape. DDIM allows for a controllable amount of noise in each denoising step via the hyperparameter $\eta$. This flexibility is a key reason for its widespread adoption, as it enables faster sampling with fewer steps than DDPM, which is crucial for computational efficiency and practical application.
+
+Specifically, setting $\eta=0$ yields a fully deterministic trajectory, making the reverse process non-Markovian, as the entire generation path is determined without intermediate stochasticity. Conversely, setting $\eta=1.0$ recovers the fully stochastic behavior of DDPM, effectively defining a Markovian reverse process where each step $x_{t-1}$ is sampled based solely on $x_t$.
+
+In our experiments, we set $\eta = 1.0$. This specific choice is critical because it ensures that the reverse diffusion process behaves stochastically and Markovian, which is consistent with our formulation of the denoising trajectory as a multi-step Markov Decision Process for policy gradient reinforcement learning. Thus, while leveraging the broad utility and efficiency benefits of the DDIM framework, this configuration specifically aligns our practical implementation with the Markovian theoretical underpinnings of our policy gradient objective. The number of inference steps is fixed to $T=50$, and the corresponding variance schedule remains unchanged during fine-tuning. This fixed schedule is crucial for computing log-likelihoods consistently, as required by the policy gradient estimator and the PPO objective.
+
+\subsection{Reward Functions}
+\label{sec:reward_functions_used}
+As a case study, we apply our method to counteract the demographic bias exhibited by the pretrained diffusion model, specifically its tendency to generate a disproportionate number of female faces. Our goal is to guide the model toward producing more male-presenting images, without compromising the realism or overall image quality. To achieve this, we define a composite reward function that integrates multiple perceptual and attribute-based signals. Given a batch of final generated images \( x_0 \), we compute the following components:
+\begin{itemize}
+    \item \textbf{ImageReward (IR):} A reward model trained to reflect human aesthetic preferences, as described in Section~\ref{sec:reward_models}. Since this model expects a text prompt as input, we use: \textit{``a natural, high-quality portrait photograph of a person with realistic facial features, normal hair color, natural expression, and clean background''}.
+    \item \textbf{Gender Reward:} This binary reward component is designed to mitigate demographic bias and encourage the generation of male-presenting images. It leverages an external pre-trained image classification pipeline \cite{gender_model} to predict the probability of an image being male. If the predicted male probability is $\ge 0.8$ or $\le 0.2$ (indicating high confidence), that probability is used as the score; otherwise, the score is set to 0.0 (for ambiguous or low-confidence predictions). This continuous score is then binarized: images with a male probability greater than or equal to 0.8 receive a reward of 1, and 0 otherwise. This mechanism directly steers the model to shift the gender distribution of generated outputs
+    \item \textbf{Aesthetic Score:} A continuous score from the LAION Aesthetic Predictor \cite{laion_repo}, discussed in Section~\ref{sec:reward_models}. This score is recorded for evaluation purposes but not directly used in the training reward.
+\end{itemize}
+
+The total reward used for optimization is computed as:
+\[
+r(x_0) = \text{IR}(x_0) + 2 \cdot \text{GenderReward}(x_0),
+\]
+where \text{IR} is the ImageReward score and \text{GenderReward} is the binary reward signal described above. All component scores are logged for evaluation and ablation.
+
+
+\subsection{Summary of Configuration} 
+To provide a concise reference, Table~\ref{tab:hyperparams_structured} summarizes the key hyperparameters and configuration details used in the experiments. For brevity, we refer to a single \textit{iteration} as one full cycle of training that includes: (1) generating a fixed batch of new samples, and (2) performing multiple PPO update epochs using those samples. An \textit{optimizer step} refers to a single parameter update performed by the optimizer based on a minibatch of trajectories from the current batch.
+
+
+\begin{table}[htb]
+  \centering
+  \caption{Hyperparameters and configuration details used in the preliminary experiments}
+  \label{tab:hyperparams_structured}
+  \begin{tabular}{ll}
+    \toprule
+    \multicolumn{2}{l}{\textbf{Hardware Setup}} \\
+    \midrule
+    Number of GPUs & 4 (NVIDIA T4) \\
+    Batch Size per GPU & 5 \\
+    Effective Batch Size & 20 \\
+    \midrule
+    \multicolumn{2}{l}{\textbf{Model}} \\
+    \midrule
+    Pretrained Model & \texttt{google/ddpm-celebahq-256} \\
+    Architecture & U-Net, 114M parameters \\
+    Dataset & CelebA-HQ (256×256 resolution) \\
+    Generation Type & Unconditional \\
+    \midrule
+    \multicolumn{2}{l}{\textbf{Scheduler}} \\
+    \midrule
+    Scheduler Type & DDIM \\
+    DDIM Noise Control ($\eta$) & 1.0 (fully stochastic) \\
+    Inference Timesteps ($T$) & 50 \\
+    Noise Schedule & Linear \\
+    $\beta_{\text{start}}$ & 0.0001 \\
+    $\beta_{\text{end}}$ & 0.02 \\
+    \midrule
+    \multicolumn{2}{l}{\textbf{Reward Configuration}} \\
+    \midrule
+    Train & ImageReward and Gender Classification Score \\
+    Evaluation & Aesthetic Score \\
+    Reward Formula & $r(x_0) = \text{IR}(x_0) + 2 \cdot \text{GenderReward}(x_0)$ \\
+    \midrule
+    \multicolumn{2}{l}{\textbf{Optimization Settings}} \\
+    \midrule
+    Optimizer & AdamW \\
+    Learning Rate & $1 \times 10^{-6}$ \\
+    Samples per Iteration & 100 \\
+    PPO epochs per Iteration & 2 \\
+    Optimizer Steps per Iteration & 10 \\
+    \bottomrule
+  \end{tabular}
+  %\fonte{Produced by the author.}
+\end{table}
+
