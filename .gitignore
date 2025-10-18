@@ -1,3 +1,11 @@
 .env
+output/
+eval_images/
+#*.png
+*.json
+*.safetensors
+__pycache__/
+wandb/
+*.pt
 *.png
 *.gif
