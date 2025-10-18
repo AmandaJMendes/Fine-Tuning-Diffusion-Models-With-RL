@@ -136,7 +136,7 @@ class CustomDDIMScheduler(DDIMScheduler):
                 prev_sample = prev_sample_mean + variance
             else:
                 prev_sample = prev_sample_mean
-                std_dev_t = 1e-10 # Only to avoid math domain error when computing log_prob
+                std_dev_t = torch.full_like(prev_sample_mean, 1e-10)  # Only to avoid math domain error when computing log_prob
         else: # Use provided latent directly
             prev_sample = prev_sampled_latent
 
