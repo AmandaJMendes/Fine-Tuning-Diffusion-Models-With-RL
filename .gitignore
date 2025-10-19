@@ -1,7 +1,7 @@
 .env
 output/
 eval_images/
-#*.png
+*.png
 *.json
 *.safetensors
 __pycache__/
