@@ -1,4 +1,8 @@
-import os, numpy as np, imageio.v2 as imageio, wandb, tqdm
+import os
+import numpy as np
+import imageio.v2 as imageio
+#import wandb
+import tqdm
 from PIL import Image
 from math import ceil, sqrt
 import matplotlib.pyplot as plt
@@ -101,7 +105,8 @@ def sample_and_plot_grid(samples_dict, k=5, out_dir="frames", plot_name="evoluti
     """
     os.makedirs(out_dir, exist_ok=True)
 
-    sorted_steps = sorted(samples_dict.keys())
+    middle = len(samples_dict) // 2
+    sorted_steps = [i for i in sorted(samples_dict.keys()) if i%100==0] #sorted(samples_dict.keys())[:10] # 
 
     # Sample k images consistently across all steps
     num_images_available = min([len(samples_dict[step]) for step in sorted_steps])
@@ -112,9 +117,10 @@ def sample_and_plot_grid(samples_dict, k=5, out_dir="frames", plot_name="evoluti
         return
 
     # Create the grid plot
-    num_steps = len(samples_dict)
+    num_steps = len(sorted_steps)
     fig, axes = plt.subplots(k, num_steps, figsize=(2 * num_steps, 2 * k))
-    
+    fig.suptitle("Visual Evolution of Samples Across Fine-Tuning", fontsize=20)
+
     # Handle case where k=1 or num_steps=1
     if k == 1 and num_steps == 1:
         axes = [[axes]]
@@ -124,20 +130,21 @@ def sample_and_plot_grid(samples_dict, k=5, out_dir="frames", plot_name="evoluti
         axes = [[ax] for ax in axes]
 
     for step_idx, step in enumerate(sorted_steps):
-        for img_idx in range(k):
-            ax = axes[img_idx][step_idx]
+        for i, img_idx in enumerate([0, 1, 5, 6, 7, 8]):
+            ax = axes[i][step_idx]
             ax.imshow(np.array(samples_dict[step][img_idx]))
             ax.axis('off')
             
             # Add step label on top row
-            if img_idx == 0:
-                ax.set_title(f'Step {step}', fontsize=10)
+            if i == 0:
+                ax.set_title(f'Step {step}', fontsize=16)
             
             # Add image index label on first column
             if step_idx == 0:
                 ax.set_ylabel(f'Image {img_idx + 1}', fontsize=10)
 
-    plt.tight_layout()
+    #plt.tight_layout()
+    plt.subplots_adjust(wspace=0.00, hspace=0.01)
     plot_path = os.path.join(out_dir, plot_name)
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()

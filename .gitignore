@@ -7,3 +7,5 @@ eval_images/
 __pycache__/
 wandb/
 *.pt
+*.png
+*.gif
