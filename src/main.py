@@ -266,6 +266,26 @@ def evaluate_model(
 
     torch.cuda.empty_cache()
 
+def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, float]:
+    with open(path, 'r') as f:
+        weights_json = json.load(f)
+
+    # Accept sparse mapping; check keys are subset
+    weights = {}
+    for k, v in weights_json.items():
+        timestep = int(k)
+        weight = max(0.0, float(v))
+        if timestep not in scheduler_timesteps:
+            raise ValueError(f"Timestep {timestep} in weights file not found in scheduler timesteps.")
+        weights[timestep] = weight
+
+    # Optionally, ensure every scheduler timestep has a weight (fill zeros or uniform)
+    for t in scheduler_timesteps:
+        weights.setdefault(int(t), 0.0)
+
+    return weights
+
+
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Fine-tune diffusion model with RL')
@@ -274,8 +294,7 @@ if __name__ == "__main__":
     parser.add_argument('--full_epochs', type=int, default=10, help='Total number of epochs')
     parser.add_argument('--epochs_per_sampling', type=int, default=2, help='Number of training epochs per sampling')
     parser.add_argument('--samples_per_epoch', type=int, default=100, help='Number of samples per epoch')
-    parser.add_argument('--first_train_step', type=int, default=0, help='First timestep to train on (inclusive)')
-    parser.add_argument('--last_train_step', type=int, default=48, help='Last timestep to train on (inclusive)')
+    parser.add_argument('--timesteps_weights_json', type=str, default=None, help='Path to JSON file with timestep weights for training')
     parser.add_argument('--num_train_timesteps', type=int, default=None, help='Number of timesteps to uniformly sample for training (default: use all timesteps in range)')
     parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate for optimizer')
     parser.add_argument('--eval_every_steps', type=int, default=20, help='Run evaluation every N optimiser steps')
@@ -286,15 +305,13 @@ if __name__ == "__main__":
     logger = get_logger(__name__, log_level="INFO")
     logging.basicConfig(level=logging.INFO) 
 
-    # Initialize the accelerator
-    accelerator = Accelerator(gradient_accumulation_steps=args.last_train_step - args.first_train_step + 1, log_with="wandb")
     # Calculate gradient accumulation steps based on training timesteps
     if args.num_train_timesteps is not None:
-        gradient_accumulation_steps = min(args.num_train_timesteps, args.last_train_step - args.first_train_step + 1)
+        gradient_accumulation_steps = args.num_train_timesteps
     else:
-        gradient_accumulation_steps = args.last_train_step - args.first_train_step + 1
+        gradient_accumulation_steps = args.inference_timesteps - 1
     
-    # Re-initialize accelerator with correct gradient accumulation steps
+    # Initialize accelerator with correct gradient accumulation steps
     accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps, log_with="wandb")
     device = accelerator.device
     logger.info(f"Using device: {device}")
@@ -318,6 +335,13 @@ if __name__ == "__main__":
     # Set the timesteps and move the alphas_cumprod to the device
     scheduler.set_timesteps(args.inference_timesteps, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
+
+    # Parse timesteps weights
+    if args.num_train_timesteps:
+        if args.timesteps_weights_json is not None:
+            timestep_weights = parse_timesteps_weights(args.timesteps_weights_json, scheduler.timesteps.tolist())
+        else:
+            timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
 
     # Initialize the optimiation steps
     global_step = 0
@@ -389,33 +413,35 @@ if __name__ == "__main__":
 
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
-            
-            # Sample timesteps for this epoch
-            if args.num_train_timesteps is None:
-                # Use all timesteps in the range
-                train_timesteps = list(range(args.first_train_step, args.last_train_step + 1))
-            else:
-                # Uniformly sample K timesteps from the range
-                all_timesteps = list(range(args.first_train_step, args.last_train_step + 1))
-                train_timesteps = torch.randperm(len(all_timesteps))[:args.num_train_timesteps].tolist()
-                train_timesteps = [all_timesteps[i] for i in train_timesteps]
+           
+            if args.num_train_timesteps is None: # Use all timesteps in the range
+                train_timesteps = scheduler.timesteps.tolist()
+            else:  # Sample timesteps for this epoch
+                ts, weights = zip(*timestep_weights.items())
+                weights_tensor = torch.tensor(weights)
+                if weights_tensor.sum() <= 0:
+                    weights_tensor = torch.ones_like(weights_tensor)
+                sampled_indices = torch.multinomial(weights_tensor, args.num_train_timesteps, replacement=True)
+                train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
             for b, batch in enumerate(batches):
                 logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
 
                 # Unpack the batch
                 latents, next_latents, log_probs, timesteps, rewards = batch 
+                t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}
                 
                 #Compute the normalized rewards, i.e. advantage
                 advantages = (rewards - global_mean) / global_std
 
                 # Accumulate gradients for each selected timestep of the current batch
                 for t in train_timesteps:
+                    t_idx = t_to_idx[t]
                     with accelerator.accumulate(pretrained_model):
                         # Get new likelihoods
-                        lat_gpu = latents[:, t].to(device, non_blocking=True)
-                        nxt_gpu = next_latents[:, t].to(device, non_blocking=True)
-                        t_gpu = timesteps[t].to(device, non_blocking=True)
+                        lat_gpu = latents[:, t_idx].to(device, non_blocking=True)
+                        nxt_gpu = next_latents[:, t_idx].to(device, non_blocking=True)
+                        t_gpu = timesteps[t_idx].to(device, non_blocking=True)
                         new_log_probs = rescore_batch(
                             pretrained_model, 
                             scheduler, 
@@ -425,7 +451,7 @@ if __name__ == "__main__":
                         )
 
                         # Importance Sampling Ratio
-                        importance_ratio = torch.exp(new_log_probs - log_probs[:, t].to(device))
+                        importance_ratio = torch.exp(new_log_probs - log_probs[:, t_idx].to(device))
 
                         # PPO clipping
                         clipped_ratio = torch.clamp(importance_ratio, 1 - 1e-4, 1 + 1e-4)
