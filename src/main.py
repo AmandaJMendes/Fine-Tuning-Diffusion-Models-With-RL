@@ -274,7 +274,7 @@ def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, f
     weights = {}
     for k, v in weights_json.items():
         timestep = int(k)
-        weight = max(0.0, float(v))
+        weight = abs(float(v))
         if timestep not in scheduler_timesteps:
             raise ValueError(f"Timestep {timestep} in weights file not found in scheduler timesteps.")
         weights[timestep] = weight
