@@ -1,5 +1,5 @@
-from .custom_ddim_scheduler import CustomDDIMScheduler
-from .rewards import reward_function
+from custom_ddim_scheduler import CustomDDIMScheduler
+from rewards import reward_function
 
 from accelerate.logging import get_logger
 from accelerate import Accelerator
@@ -348,6 +348,8 @@ if __name__ == "__main__":
             timestep_weights = parse_timesteps_weights(args.timesteps_weights_json, scheduler.timesteps.tolist())
         else:
             timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
+    timestep_weights[0] = 0.0 # Discard final timestep 
+    print("Timestep weights: ", timestep_weights)
 
     # Initialize the optimiation steps
     global_step = 0
@@ -421,12 +423,10 @@ if __name__ == "__main__":
         for inner_epoch in range(args.epochs_per_sampling):
            
             if args.num_train_timesteps is None: # Use all timesteps in the range
-                train_timesteps = scheduler.timesteps.tolist()
+                train_timesteps = [t for t in scheduler.timesteps.tolist() if t != 0]
             else:  # Sample timesteps for this epoch
                 ts, weights = zip(*timestep_weights.items())
                 weights_tensor = torch.tensor(weights)
-                if weights_tensor.sum() <= 0:
-                    weights_tensor = torch.ones_like(weights_tensor)
                 sampled_indices = torch.multinomial(weights_tensor, args.num_train_timesteps, replacement=True)
                 train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
