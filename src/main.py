@@ -318,6 +318,12 @@ if __name__ == "__main__":
 
     # Initialize wandb
     accelerator.init_trackers(project_name="diffusion-finetune", config=args)
+    if accelerator.is_main_process:
+        # Log the code to wandb
+        wandb.run.log_code(
+            root=".", 
+            include_fn=lambda p: p.endswith(".py") or p.endswith(".json")
+        )
 
     # Define number of samples and batches per GPU
     num_batches_per_gpu = math.ceil(args.samples_per_epoch / (args.per_gpu_batch_size * accelerator.num_processes))
