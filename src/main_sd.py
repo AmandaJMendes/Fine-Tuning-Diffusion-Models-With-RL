@@ -106,7 +106,8 @@ def generate_batch(
         max_length=tokenizer.model_max_length,
         return_tensors="pt"
     )
-    text_embeddings = text_encoder(text_inputs.input_ids.to(device))[0]
+    with torch.no_grad():
+        text_embeddings = text_encoder(text_inputs.input_ids.to(device))[0]
 
     # Encode unconditional prompt for classifier-free guidance (optional)
     if guidance_scale:
@@ -117,10 +118,10 @@ def generate_batch(
             return_tensors="pt"
         )
         uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
-
-        text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+        with torch.no_grad():
+            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
     
-    text_embeddings = text_embeddings.to(device=device, dtype=model.dtype)
+    text_embeddings = text_embeddings.to(device=device).detach()
 
     # Start from pure noise
     n_channels = model.config.in_channels
