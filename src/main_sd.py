@@ -124,13 +124,13 @@ def generate_batch(
     text_embeddings = text_embeddings.to(device=device).detach()
 
     # Start from pure noise
-    n_channels = model.config.in_channels
-    image_size = model.config.sample_size
+    n_channels = model.module.config.in_channels
+    image_size = model.module.config.sample_size
     latents = torch.randn(
         (batch_size, n_channels, image_size, image_size),
         device=device,
         generator=generator,
-        dtype=model.dtype
+        dtype=model.module.dtype
     )
 
     # Initialize the arrays
