@@ -302,11 +302,11 @@ def evaluate_model(
                 )
 
             # collect the images from all ranks
-            gathered = accelerator.gather(next_latents[:, -1].to(device, non_blocking=True))      
+            gathered = accelerator.gather(images.to(device, non_blocking=True))      
 
             if accelerator.is_main_process:                            # only rank-0 logs
                 imgs = gathered.cpu().permute(0, 2, 3, 1)
-                imgs = ((imgs + 1.0) * 127.5).numpy().astype(np.uint8)
+                imgs = (imgs*255).numpy().astype(np.uint8)
 
                 wandb_imgs = []
                 for idx, arr in enumerate(imgs):
