@@ -3,7 +3,7 @@ from .rewards import reward_function
 
 from accelerate.logging import get_logger
 from accelerate import Accelerator
-from diffusers import UNet2DModel
+from diffusers import StableDiffusionPipeline
 from tqdm import tqdm
 from PIL import Image
 
@@ -65,9 +65,10 @@ def capture_grad_moments(model, accelerator):
 
 
 def generate_batch(
-    model,   
-    scheduler,
+    pipeline: StableDiffusionPipeline,
     batch_size: int,  
+    prompt: str = "A high-resolution photo of a person",
+    guidance_scale: float = 7.5,
     device="cuda:0",
     generator: torch.Generator | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -75,9 +76,9 @@ def generate_batch(
     Generate a batch of images from the model.
 
     Args:
-        model:       diffusion network
-        scheduler:   DDIM scheduler
+        pipeline:    the diffusion pipeline
         batch_size:  number of samples in the batch
+        prompt:      text prompt for conditional models
         device:      device on which to place the tensors
         generator:   optional private RNG (keeps global RNG untouched)  # NEW
     Returns:
@@ -85,7 +86,41 @@ def generate_batch(
         next_latents: (B, T, C, H, W)
         log_probs:    (B, T)
         timesteps:    (T,)
+        text_embeddings: (B, seq_len, dim)
     """
+
+    # Unpack the pipeline
+    model = pipeline.unet
+    scheduler = pipeline.scheduler
+    text_encoder = pipeline.text_encoder if hasattr(pipeline, 'text_encoder') else None
+    tokenizer = pipeline.tokenizer if hasattr(pipeline, 'tokenizer') else None
+
+    # Ensure either all of text_encoder, tokenizer and prompt are provided, or none of them.
+    if not (text_encoder and tokenizer and prompt):
+        raise ValueError("For conditional modelling, text_encoder, tokenizer and prompt must all be provided")
+
+    # Encode text prompt 
+    text_inputs = tokenizer(
+        [prompt] * batch_size,  
+        padding="max_length",
+        max_length=tokenizer.model_max_length,
+        return_tensors="pt"
+    )
+    text_embeddings = text_encoder(text_inputs.input_ids.to(device))[0]
+
+    # Encode unconditional prompt for classifier-free guidance (optional)
+    if guidance_scale:
+        uncond_input = tokenizer(
+            [""] * batch_size,
+            padding="max_length",
+            max_length=tokenizer.model_max_length,
+            return_tensors="pt"
+        )
+        uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
+
+        text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+    
+    text_embeddings = text_embeddings.to(device=device, dtype=model.dtype)
 
     # Start from pure noise
     n_channels = model.config.in_channels
@@ -93,7 +128,8 @@ def generate_batch(
     latents = torch.randn(
         (batch_size, n_channels, image_size, image_size),
         device=device,
-        generator=generator
+        generator=generator,
+        dtype=model.dtype
     )
 
     # Initialize the arrays
@@ -107,10 +143,18 @@ def generate_batch(
         # Append the latents to the list
         latents_list.append(latents.cpu())
 
+        # Expand latents for classifier-free guidance (optional)
+        latent_model_input = torch.cat([latents] * 2) if guidance_scale else latents
+
         # Disable gradient calculation since these samples are not part of the training loop
         with torch.no_grad():
-            # Get the model prediction
-            pred_noise = model(latents, t).sample
+            # Predict noise
+            pred_noise = model(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+
+            # Perform classifier-free guidance (optional)
+            if guidance_scale:
+                noise_pred_uncond, noise_pred_text = pred_noise.chunk(2)
+                pred_noise = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # Step the scheduler to get the next latents
             scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=1.0, generator=generator)
@@ -127,14 +171,16 @@ def generate_batch(
     log_probs = torch.stack(log_probs_list).permute(1, 0) #shape: (B, T)
     timesteps = torch.tensor(timesteps_list) #shape: (T)
 
-    return latents, next_latents, log_probs, timesteps
+    return latents, next_latents, log_probs, timesteps, text_embeddings
 
 def rescore_batch(
     model,
     scheduler,
     latents: torch.Tensor, #shape: (B, C, H, W)
     next_latents: torch.Tensor, #shape: (B, C, H, W)
-    timesteps: torch.Tensor #shape: (B,)
+    timesteps: torch.Tensor, #shape: (B,)
+    text_embeddings: torch.Tensor, #shape: (2*B, seq_len, dim) if guidance else (B, seq_len, dim)
+    guidance_scale: float = 7.5,
 ) -> torch.Tensor:
     """
     Compute log p(next_latents | latents) with `model` and return (B,).
@@ -145,9 +191,22 @@ def rescore_batch(
         latents: shape (B, C, H, W)
         next_latents: shape (B, C, H, W)
         timesteps: shape (B,)
+        text_embeddings: shape (2*B, seq_len, dim) if guidance else (B, seq_len, dim)
+        guidance_scale: guidance scale for classifier-free guidance
+    Returns:
+        log_probs: shape (B,)
     """
+
+    # Expand latents for classifier-free guidance (optional)
+    latent_model_input = torch.cat([latents] * 2) if guidance_scale else latents
+    
     # Get the model prediction
-    pred_noise = model(latents, timesteps).sample
+    pred_noise = model(latent_model_input, timesteps, encoder_hidden_states=text_embeddings).sample
+
+    # Perform classifier-free guidance (optional)
+    if guidance_scale:
+        noise_pred_uncond, noise_pred_text = pred_noise.chunk(2)
+        pred_noise = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
     # Step the scheduler to get the log prob of next_latents given latents  
     _, log_prob = scheduler.step(pred_noise, timesteps, latents, next_latents, eta=1.0)
@@ -189,12 +248,12 @@ def check_model_sync(accelerator, model, tol=1e-6):
 
 def evaluate_model(
     step: int,
-    model: UNet2DModel,
-    scheduler: CustomDDIMScheduler,
+    pipeline: StableDiffusionPipeline,
     num_samples: int,
     batch_size: int,
     device: torch.device,
     accelerator: Accelerator,
+    guidance_scale: float = 7.5,
     fixed_seed: int = 1234,
     save_dir: str = "eval_images",
 ):
@@ -203,6 +262,8 @@ def evaluate_model(
     (→ training randomness proceeds as usual).
     """
     os.makedirs(save_dir, exist_ok=True)
+
+    model = pipeline.unet
 
     was_training = model.training
     model.eval()
@@ -218,11 +279,19 @@ def evaluate_model(
             # private generator = no impact on global RNG
             gen = torch.Generator(device=device).manual_seed(fixed_seed + i + accelerator.process_index)
 
-            latents, next_latents, _, _ = generate_batch(
-                model, scheduler, batch_size, device=device, generator=gen
+            _, next_latents, _, _, _ = generate_batch(
+                pipeline, batch_size, device=device, generator=gen, guidance_scale=guidance_scale
             )
 
-            rewards, scores = reward_function(next_latents[:, -1])
+            # Decode latents to images
+            with torch.no_grad():
+                final_latents = next_latents[:, -1].to(pipeline.device)
+                final_latents = final_latents / 0.18215
+                images = pipeline.vae.decode(final_latents).sample
+                images = (images / 2 + 0.5).clamp(0, 1)
+
+            # Compute rewards
+            rewards, scores = reward_function(images)
             rewards = rewards.to(device)
 
             all_rewards.append(accelerator.gather(rewards))
@@ -299,6 +368,7 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate for optimizer')
     parser.add_argument('--eval_every_steps', type=int, default=20, help='Run evaluation every N optimiser steps')
     parser.add_argument('--eval_samples', type=int, default=20, help='Total #samples drawn in each evaluation')
+    parser.add_argument('--guidance_scale', type=float, default=7.5, help='Guidance scale for sampling')
     args = parser.parse_args()
     
     # Create a logger
@@ -323,14 +393,23 @@ if __name__ == "__main__":
     num_batches_per_gpu = math.ceil(args.samples_per_epoch / (args.per_gpu_batch_size * accelerator.num_processes))
 
     # Load the model and scheduler
-    scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors = True)
-    pretrained_model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
+    pipe = StableDiffusionPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5",
+        torch_dtype=torch.float16
+    ).to(device)
+    pipe.scheduler = CustomDDIMScheduler.from_config(pipe.scheduler.config)
+
+    pretrained_model = pipe.unet
+    scheduler = pipe.scheduler
 
     # Define the optimizer
     optimizer = torch.optim.AdamW(pretrained_model.parameters(), lr=args.learning_rate)
 
     # Prepare the model for DDP
-    pretrained_model, optimizer = accelerator.prepare(pretrained_model, optimizer)                   
+    pretrained_model, optimizer = accelerator.prepare(pretrained_model, optimizer)    
+
+    # Update the pipeline to use the wrapped model
+    pipe.unet = pretrained_model               
 
     # Set the timesteps and move the alphas_cumprod to the device
     scheduler.set_timesteps(args.inference_timesteps, device=device)
@@ -350,12 +429,12 @@ if __name__ == "__main__":
     logger.info("Evaluating model before fine-tuning")
     evaluate_model(
         step=global_step,
-        model=pretrained_model.module,
-        scheduler=scheduler,
+        pipeline=pipe,
         num_samples=args.eval_samples,
         batch_size=args.per_gpu_batch_size,
         device=device,
-        accelerator=accelerator
+        accelerator=accelerator,
+        guidance_scale=args.guidance_scale
     )
 
     # Sampling + Optimization loop
@@ -372,10 +451,17 @@ if __name__ == "__main__":
 
         # Sampling loop
         for _ in tqdm(range(num_batches_per_gpu), desc=f"Generating batches of size {args.per_gpu_batch_size}", disable=not accelerator.is_main_process):
-            latents, next_latents, log_probs, timesteps = generate_batch(pretrained_model.module, scheduler, args.per_gpu_batch_size, device)
-            
+            latents, next_latents, log_probs, timesteps, text_embeddings = generate_batch(pipe, args.per_gpu_batch_size, guidance_scale=args.guidance_scale, device=device)
+
+            # Decode latents to images
+            with torch.no_grad():
+                final_latents = next_latents[:, -1].to(pipe.device)
+                final_latents = final_latents / 0.18215
+                images = pipe.vae.decode(final_latents).sample
+                images = (images / 2 + 0.5).clamp(0, 1)
+
             # Get the rewards in the current GPU
-            rewards, scores = reward_function(next_latents[:, -1])
+            rewards, scores = reward_function(images)
             rewards = rewards.to(device)
 
             # Gather the rewards and metrics from all GPUs
@@ -389,7 +475,7 @@ if __name__ == "__main__":
                 all_metrics[k].append(gathered_metric.cpu().flatten())
 
             # Append the batch to the list
-            batches.append((latents, next_latents, log_probs, timesteps, rewards))
+            batches.append((latents, next_latents, log_probs, timesteps, rewards, text_embeddings))
             torch.cuda.empty_cache()
 
         # Compute the reward avg and std in this sampling epoch
@@ -428,7 +514,10 @@ if __name__ == "__main__":
                 logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
 
                 # Unpack the batch
-                latents, next_latents, log_probs, timesteps, rewards = batch 
+                latents, next_latents, log_probs, timesteps, rewards, text_embeddings = batch 
+                text_embeddings = text_embeddings.to(device, non_blocking=True)
+
+                # Create a mapping from timestep to index for quick lookup
                 t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}
                 
                 #Compute the normalized rewards, i.e. advantage
@@ -447,7 +536,9 @@ if __name__ == "__main__":
                             scheduler, 
                             lat_gpu, 
                             nxt_gpu, 
-                            t_gpu
+                            t_gpu,
+                            text_embeddings,
+                            guidance_scale=args.guidance_scale
                         )
 
                         # Importance Sampling Ratio
@@ -489,12 +580,12 @@ if __name__ == "__main__":
                                 logger.info(f"Evaluating model at step {global_step}")
                                 evaluate_model(
                                     step=global_step,
-                                    model=pretrained_model.module,
-                                    scheduler=scheduler,
+                                    pipeline=pipe,
                                     num_samples=args.eval_samples,
                                     batch_size=args.per_gpu_batch_size,
                                     device=device,
-                                    accelerator=accelerator
+                                    accelerator=accelerator,
+                                    guidance_scale=args.guidance_scale
                                 )
 
                 # Synchronize the processes
