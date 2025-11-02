@@ -50,7 +50,11 @@ def reward_function(latents_batch):
 
     # Convert latents batch to list of PIL images
     image_processed = latents_batch.permute(0, 2, 3, 1)
-    image_processed = (image_processed + 1.0) * 127.5
+    if image_processed.min() < 0: # [-1, 1]
+        image_processed = (image_processed + 1.0) * 127.5
+    else: # [0, 1]
+        image_processed = (image_processed) * 255
+
     image_processed = image_processed.numpy().astype(np.uint8)
     images = [PIL.Image.fromarray(image_processed[i]) for i in range(image_processed.shape[0])]
     
