@@ -351,6 +351,11 @@ if __name__ == "__main__":
     timestep_weights[0] = 0.0 # Discard final timestep 
     print("Timestep weights: ", timestep_weights)
 
+    if accelerator.is_main_process and args.timesteps_weights_json:
+        art = wandb.Artifact("timestep-weights", type="config")
+        art.add_file(args.timesteps_weights_json, name="timestep_weights.json")
+        wandb.log_artifact(art)
+
     # Initialize the optimiation steps
     global_step = 0
 
