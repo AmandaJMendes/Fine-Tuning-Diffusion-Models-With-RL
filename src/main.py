@@ -1,5 +1,5 @@
-from .custom_ddim_scheduler import CustomDDIMScheduler
-from .rewards import reward_function
+from custom_ddim_scheduler import CustomDDIMScheduler
+from rewards import reward_function
 
 from accelerate.logging import get_logger
 from accelerate import Accelerator
@@ -274,7 +274,7 @@ def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, f
     weights = {}
     for k, v in weights_json.items():
         timestep = int(k)
-        weight = max(0.0, float(v))
+        weight = abs(float(v))
         if timestep not in scheduler_timesteps:
             raise ValueError(f"Timestep {timestep} in weights file not found in scheduler timesteps.")
         weights[timestep] = weight
@@ -318,6 +318,12 @@ if __name__ == "__main__":
 
     # Initialize wandb
     accelerator.init_trackers(project_name="diffusion-finetune", config=args)
+    if accelerator.is_main_process:
+        # Log the code to wandb
+        wandb.run.log_code(
+            root=".", 
+            include_fn=lambda p: p.endswith(".py") or p.endswith(".json")
+        )
 
     # Define number of samples and batches per GPU
     num_batches_per_gpu = math.ceil(args.samples_per_epoch / (args.per_gpu_batch_size * accelerator.num_processes))
@@ -342,6 +348,13 @@ if __name__ == "__main__":
             timestep_weights = parse_timesteps_weights(args.timesteps_weights_json, scheduler.timesteps.tolist())
         else:
             timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
+    timestep_weights[0] = 0.0 # Discard final timestep 
+    print("Timestep weights: ", timestep_weights)
+
+    if accelerator.is_main_process and args.timesteps_weights_json:
+        art = wandb.Artifact("timestep-weights", type="config")
+        art.add_file(args.timesteps_weights_json, name="timestep_weights.json")
+        wandb.log_artifact(art)
 
     # Initialize the optimiation steps
     global_step = 0
@@ -415,12 +428,10 @@ if __name__ == "__main__":
         for inner_epoch in range(args.epochs_per_sampling):
            
             if args.num_train_timesteps is None: # Use all timesteps in the range
-                train_timesteps = scheduler.timesteps.tolist()
+                train_timesteps = [t for t in scheduler.timesteps.tolist() if t != 0]
             else:  # Sample timesteps for this epoch
                 ts, weights = zip(*timestep_weights.items())
                 weights_tensor = torch.tensor(weights)
-                if weights_tensor.sum() <= 0:
-                    weights_tensor = torch.ones_like(weights_tensor)
                 sampled_indices = torch.multinomial(weights_tensor, args.num_train_timesteps, replacement=True)
                 train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
