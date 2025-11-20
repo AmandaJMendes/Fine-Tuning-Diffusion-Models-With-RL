@@ -435,6 +435,24 @@ if __name__ == "__main__":
                 sampled_indices = torch.multinomial(weights_tensor, args.num_train_timesteps, replacement=True)
                 train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
+            # Log timesteps chosen by each process to wandb
+            timesteps_tensor = torch.tensor(train_timesteps, device=device)
+            all_timesteps = accelerator.gather(timesteps_tensor)
+            if accelerator.is_main_process:
+                all_ts = all_timesteps.cpu().to(torch.long).tolist()
+
+                scheduler_ts = scheduler.timesteps.cpu().tolist()
+                timestep_counts = {int(t): 0 for t in scheduler_ts}
+
+                # Accumulate counts
+                for t in all_ts:
+                    timestep_counts[int(t)] += 1
+
+                # Log to wandb
+                log_dict = {f"timesteps/t={t}": count for t, count in timestep_counts.items()}
+                accelerator.log(log_dict, step=global_step)
+
+
             for b, batch in enumerate(batches):
                 logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
 
