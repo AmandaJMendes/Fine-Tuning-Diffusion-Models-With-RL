@@ -348,8 +348,8 @@ if __name__ == "__main__":
             timestep_weights = parse_timesteps_weights(args.timesteps_weights_json, scheduler.timesteps.tolist())
         else:
             timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
-    timestep_weights[0] = 0.0 # Discard final timestep 
-    print("Timestep weights: ", timestep_weights)
+        timestep_weights[0] = 0.0 # Discard final timestep 
+        print("Timestep weights: ", timestep_weights)
 
     if accelerator.is_main_process and args.timesteps_weights_json:
         art = wandb.Artifact("timestep-weights", type="config")
