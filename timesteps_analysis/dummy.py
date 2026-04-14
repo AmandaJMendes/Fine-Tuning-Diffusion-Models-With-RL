@@ -1,12 +1,14 @@
 import os
+
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 # Configuration
 num_workers = 2
-num_images = 3          # number of generated images per worker
-num_timesteps = 5       # number of timesteps
-num_samples = 4         # number of denoised samples per image per timestep
+num_images = 3  # number of generated images per worker
+num_timesteps = 5  # number of timesteps
+num_samples = 4  # number of denoised samples per image per timestep
 score_keys = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
 
 base_dir = "./dummy_workers"
@@ -50,12 +52,14 @@ for worker_id in range(num_workers):
     print(f"Created dummy CSV: {csv_path}")
 
 
-import os
-import numpy as np
-from PIL import Image
-
-def create_dummy_recon_images(plot_dir="dummy_workers", num_workers=2, num_images=2,
-                               num_timesteps=10, num_samples=5, image_size=(64, 64)):
+def create_dummy_recon_images(
+    plot_dir="dummy_workers",
+    num_workers=2,
+    num_images=2,
+    num_timesteps=10,
+    num_samples=5,
+    image_size=(64, 64),
+):
     """
     Creates dummy reconstruction images for testing GIF creation.
 
@@ -77,15 +81,16 @@ def create_dummy_recon_images(plot_dir="dummy_workers", num_workers=2, num_image
             for t in range(num_timesteps):
                 for sample_idx in range(num_samples):
                     # Generate random RGB image in [0, 255]
-                    dummy_img = np.random.randint(0, 256, (image_size[0], image_size[1], 3), dtype=np.uint8)
+                    dummy_img = np.random.randint(
+                        0, 256, (image_size[0], image_size[1], 3), dtype=np.uint8
+                    )
                     img = Image.fromarray(dummy_img)
 
-                    save_path = os.path.join(
-                        recon_dir, f"img{img_idx}_t{t}_sample{sample_idx}.png"
-                    )
+                    save_path = os.path.join(recon_dir, f"img{img_idx}_t{t}_sample{sample_idx}.png")
                     img.save(save_path)
 
     print(f"Dummy images created in {plot_dir}")
+
 
 # Example usage
 create_dummy_recon_images()

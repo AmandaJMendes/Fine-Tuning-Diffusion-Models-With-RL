@@ -1,7 +1,7 @@
-import sys
-import os
 import argparse
 import csv
+import os
+import sys
 
 # Use a fallback if __file__ is not defined (e.g., in Jupyter)
 try:
@@ -9,16 +9,16 @@ try:
 except NameError:
     notebook_dir = os.getcwd()
 sys.path.append(os.path.abspath(os.path.join(notebook_dir, "..")))
-from src.main import generate_batch 
-from src.custom_ddim_scheduler import CustomDDIMScheduler
-from src.rewards import reward_function
-
-from diffusers import UNet2DModel
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from diffusers import UNet2DModel
 from PIL import Image
+from tqdm import tqdm
+
+from src.custom_ddim_scheduler import CustomDDIMScheduler
+from src.main import generate_batch
+from src.rewards import reward_function
+
 
 def add_noise(x0, n_samples, scheduler, timestep, device, generator=None):
     """
@@ -50,6 +50,7 @@ def add_noise(x0, n_samples, scheduler, timestep, device, generator=None):
     # Use scheduler.add_noise if available
     return scheduler.add_noise(x0, noise, t)
 
+
 def save_tensor_as_image(tensor, path):
     """
     Save a single image tensor ([3,H,W] in [-1,1]) as a PNG image.
@@ -59,8 +60,11 @@ def save_tensor_as_image(tensor, path):
     img = Image.fromarray(img)
     img.save(path)
 
+
 @torch.inference_mode()
-def denoise_corrupted_batched(corrupted_imgs, model, scheduler, batch_size=None, t_start=None, device=None, eta=0.0):
+def denoise_corrupted_batched(
+    corrupted_imgs, model, scheduler, batch_size=None, t_start=None, device=None, eta=0.0
+):
     """
     Optimized batched version that processes all samples together, with configurable batch size.
 
@@ -104,8 +108,10 @@ def denoise_corrupted_batched(corrupted_imgs, model, scheduler, batch_size=None,
     # Concatenate all batches into a single tensor of shape (num_samples, 3, 256, 256)
     return torch.cat(all_latents, dim=0)
 
+
 # Make sure to always write these four scores (or None if they are missing)
 SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
+
 
 def write_score_row(writer, timestep, image_idx, sample_idx, reward, scores):
     """
@@ -137,18 +143,44 @@ def write_score_row(writer, timestep, image_idx, sample_idx, reward, scores):
 if __name__ == "__main__":
     print("🚀 Starting Perceptual Analysis of Denoising at Different Timesteps...")
 
-    parser = argparse.ArgumentParser(description="Perceptual analysis of denoising at different timesteps.")
-    parser.add_argument("--num_gen_images", type=int, default=2, help="Number of images to keep for analysis (n)")
-    parser.add_argument("--num_denoised_samples", type=int, default=5, help="Number of denoised samples per image per timestep")
-    parser.add_argument("--plot_dir", type=str, default=".", help="Directory to save resulting plots")
-    parser.add_argument("--batch_size", type=int, default=10, help="Batch size for denoising samples")
+    parser = argparse.ArgumentParser(
+        description="Perceptual analysis of denoising at different timesteps."
+    )
+    parser.add_argument(
+        "--num_gen_images", type=int, default=2, help="Number of images to keep for analysis (n)"
+    )
+    parser.add_argument(
+        "--num_denoised_samples",
+        type=int,
+        default=5,
+        help="Number of denoised samples per image per timestep",
+    )
+    parser.add_argument(
+        "--plot_dir", type=str, default=".", help="Directory to save resulting plots"
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=10, help="Batch size for denoising samples"
+    )
     parser.add_argument("--plot_every_k", type=int, default=10, help="Plot every k timesteps")
-    parser.add_argument("--num_plot_samples", type=int, default=3, help="Number of denoised samples to plot at each plotted timestep (m)")
-    parser.add_argument("--eta", type=float, default=0.0, help="Eta value (stochasticity parameter) to pass to scheduler.step; 0 is deterministic (default)")
+    parser.add_argument(
+        "--num_plot_samples",
+        type=int,
+        default=3,
+        help="Number of denoised samples to plot at each plotted timestep (m)",
+    )
+    parser.add_argument(
+        "--eta",
+        type=float,
+        default=0.0,
+        help=(
+            "Eta value (stochasticity parameter) to pass to scheduler.step; "
+            "0 is deterministic (default)"
+        ),
+    )
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    num_gen_images = args.num_gen_images 
+    num_gen_images = args.num_gen_images
     num_denoised_samples = args.num_denoised_samples
     plot_dir = os.path.join(args.plot_dir, f"worker_{local_rank}")
     batch_size = args.batch_size
@@ -177,19 +209,23 @@ if __name__ == "__main__":
     csv_keys = ["timestep", "image_idx", "sample_idx", "reward"] + SCORE_KEYS
     csv_path = os.path.join(plot_dir, "scores_per_image_timestep.csv")
     # Write header
-    with open(csv_path, "w", newline='') as csvfile:
+    with open(csv_path, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
         writer.writeheader()
 
     # Load model and scheduler
     print(f"🧠 [{local_rank}] Loading model and scheduler...")
-    scheduler = CustomDDIMScheduler.from_pretrained("google/ddpm-celebahq-256", use_safetensors = True)
+    scheduler = CustomDDIMScheduler.from_pretrained(
+        "google/ddpm-celebahq-256", use_safetensors=True
+    )
     model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
     scheduler.set_timesteps(50)
 
     # Generate images
     print(f"🖼️ [{local_rank}] Generating {num_gen_images} images...")
-    _, next_latents, _, timesteps = generate_batch(model, scheduler, num_gen_images, device) # next_latents: [num_gen_images, timesteps, C, H, W] ; timesteps: [timesteps]
+    _, next_latents, _, timesteps = generate_batch(
+        model, scheduler, num_gen_images, device
+    )  # next_latents: [num_gen_images, timesteps, C, H, W] ; timesteps: [timesteps]
     original_images = next_latents[:, -1]
 
     # SAVE ALL GENERATED IMAGES
@@ -199,11 +235,14 @@ if __name__ == "__main__":
         save_tensor_as_image(orig_img.cpu(), save_img_path)
     print(f"✅ [{local_rank}] Saved all generated images.")
 
-    # Compute and save original reward/IR/gender/aesthetics/sex_score scores for all chosen/generated images
+    # Compute and save original reward/IR/gender/aesthetics/sex_score scores
+    # for all chosen/generated images.
     print(f"💾 [{local_rank}] Saving original scores for generated images...")
-    original_rewards, original_scores = reward_function(original_images)  # original_images: [num_gen_images, C, H, W]
+    original_rewards, original_scores = reward_function(
+        original_images
+    )  # original_images: [num_gen_images, C, H, W]
 
-    with open(csv_path, "a", newline='') as csvfile:
+    with open(csv_path, "a", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
         for img_idx in range(num_gen_images):
             per_sample_scores = {}
@@ -216,37 +255,49 @@ if __name__ == "__main__":
                 image_idx=img_idx,
                 sample_idx=None,
                 reward=original_rewards[img_idx],
-                scores=per_sample_scores
+                scores=per_sample_scores,
             )
     print(f"💾 [{local_rank}] Original scores for all generated images saved.")
 
     # Denoise from intermediate timesteps, for each image
     print(f"✨ [{local_rank}] Denoising latents for all generated images and timesteps...")
     # Open the CSV file once for writing denoised sample scores
-    with open(csv_path, "a", newline='', buffering=1) as csvfile:
+    with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
-        for t_idx, timestep in enumerate(tqdm(timesteps, desc=f"Denoising latents for all images [{local_rank}]")):
-            plot_this_timestep = (t_idx % plot_every_k == 0 or t_idx == len(timesteps) - 1)  # Also plot at final timestep
+        for t_idx, timestep in enumerate(
+            tqdm(timesteps, desc=f"Denoising latents for all images [{local_rank}]")
+        ):
+            plot_this_timestep = (
+                t_idx % plot_every_k == 0 or t_idx == len(timesteps) - 1
+            )  # Also plot at final timestep
 
             for img_idx in range(num_gen_images):
-                destroyed_img_to_t = add_noise(original_images[img_idx], num_denoised_samples, scheduler, timestep, device) # shape: [num_samples, C, H, W]
-                
-                denoised = denoise_corrupted_batched(
-                    destroyed_img_to_t, model, scheduler, batch_size=batch_size, t_start=timestep, device=device, eta=eta
-                )  # denoised: [num_samples, C, H, W]
+                destroyed_img_to_t = add_noise(
+                    original_images[img_idx], num_denoised_samples, scheduler, timestep, device
+                )  # shape: [num_samples, C, H, W]
 
+                denoised = denoise_corrupted_batched(
+                    destroyed_img_to_t,
+                    model,
+                    scheduler,
+                    batch_size=batch_size,
+                    t_start=timestep,
+                    device=device,
+                    eta=eta,
+                )  # denoised: [num_samples, C, H, W]
 
                 # Compute reward for batch of denoised samples
                 rewards, scores = reward_function(denoised)
 
                 if plot_this_timestep:
-                    # Save up to num_plot_samples reconstructed denoised images for this image and timestep,
-                    # each sample as its own file, identified by img_idx, timestep, and sample_idx in the filename
+                    # Save up to num_plot_samples reconstructed denoised images
+                    # for this image and timestep.
+                    # Each sample is saved in its own file, identified by
+                    # img_idx, timestep, and sample_idx in the filename.
                     vis_samples = min(num_plot_samples, denoised.shape[0])
                     for sample_idx in range(vis_samples):
                         save_path = os.path.join(
-                            recon_plots_dir,
-                            f"img{img_idx}_t{timestep}_sample{sample_idx}.png"
+                            recon_plots_dir, f"img{img_idx}_t{timestep}_sample{sample_idx}.png"
                         )
                         save_tensor_as_image(denoised[sample_idx].cpu(), save_path)
 
@@ -263,10 +314,10 @@ if __name__ == "__main__":
                         image_idx=img_idx,
                         sample_idx=sample_idx,
                         reward=rewards[sample_idx],
-                        scores=per_sample_scores
+                        scores=per_sample_scores,
                     )
 
             # 🧹 Free cached GPU memory before next timestep
             torch.cuda.empty_cache()
-    
+
     print(f"✅ [{local_rank}] Perceptual analysis completed.")

@@ -1,23 +1,23 @@
+import argparse
+import contextlib
+import json
+import logging
+import math
+import os
+
+import numpy as np
+import torch
+import torch.distributed as dist
+import wandb
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from diffusers import StableDiffusionPipeline
+from PIL import Image
+from tqdm import tqdm
+
 from .custom_ddim_scheduler import CustomDDIMScheduler
 from .rewards import reward_function
 
-from accelerate.logging import get_logger
-from accelerate import Accelerator
-from diffusers import StableDiffusionPipeline
-from tqdm import tqdm
-from PIL import Image
-
-
-import torch.distributed as dist
-import numpy as np
-import contextlib
-import argparse
-import logging
-import torch
-import wandb
-import json
-import math
-import os
 
 @contextlib.contextmanager
 def capture_grad_moments(model, accelerator):
@@ -27,13 +27,13 @@ def capture_grad_moments(model, accelerator):
     """
     model = accelerator.unwrap_model(model)
 
-    N = S = Q = 0.0                       # Python floats
+    N = S = Q = 0.0  # Python floats
 
     def _hook(grad):
         nonlocal N, S, Q
         g = grad.detach()
         N += g.numel()
-        S += g.sum().item()               # 1 scalar cpu-side
+        S += g.sum().item()  # 1 scalar cpu-side
         Q += (g * g).sum().item()
 
     handles = [p.register_hook(_hook) for p in model.parameters()]
@@ -44,16 +44,16 @@ def capture_grad_moments(model, accelerator):
             h.remove()
 
         # --- all-reduce three scalars ---
-        for name, val in zip(("N", "S", "Q"), (N, S, Q)):
+        for name, val in zip(("N", "S", "Q"), (N, S, Q), strict=False):
             t = torch.tensor(val, device=accelerator.device)
             accelerator.reduce(t, reduction="sum")
-            locals()[name] = t.item()     # overwrite N, S, Q
+            locals()[name] = t.item()  # overwrite N, S, Q
 
         if accelerator.is_main_process:
             if N == 0:
                 stats = dict(N=0, mean=0.0, var=0.0, std=0.0)
             else:
-                mu  = S / N
+                mu = S / N
                 var = max(Q / N - mu * mu, 0.0)
                 stats = dict(N=N, mean=mu, var=var, std=math.sqrt(var))
         else:
@@ -63,14 +63,13 @@ def capture_grad_moments(model, accelerator):
         object.__setattr__(capture_grad_moments, "result", stats)
 
 
-
 def generate_batch(
     pipeline: StableDiffusionPipeline,
-    batch_size: int,  
+    batch_size: int,
     prompt: str = "A high-resolution photo of a person",
     guidance_scale: float = 7.5,
     device="cuda:0",
-    generator: torch.Generator | None = None
+    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Generate a batch of images from the model.
@@ -92,19 +91,21 @@ def generate_batch(
     # Unpack the pipeline
     model = pipeline.unet
     scheduler = pipeline.scheduler
-    text_encoder = pipeline.text_encoder if hasattr(pipeline, 'text_encoder') else None
-    tokenizer = pipeline.tokenizer if hasattr(pipeline, 'tokenizer') else None
+    text_encoder = pipeline.text_encoder if hasattr(pipeline, "text_encoder") else None
+    tokenizer = pipeline.tokenizer if hasattr(pipeline, "tokenizer") else None
 
     # Ensure either all of text_encoder, tokenizer and prompt are provided, or none of them.
     if not (text_encoder and tokenizer and prompt):
-        raise ValueError("For conditional modelling, text_encoder, tokenizer and prompt must all be provided")
+        raise ValueError(
+            "For conditional modelling, text_encoder, tokenizer and prompt must all be provided"
+        )
 
-    # Encode text prompt 
+    # Encode text prompt
     text_inputs = tokenizer(
-        [prompt] * batch_size,  
+        [prompt] * batch_size,
         padding="max_length",
         max_length=tokenizer.model_max_length,
-        return_tensors="pt"
+        return_tensors="pt",
     )
     with torch.no_grad():
         text_embeddings = text_encoder(text_inputs.input_ids.to(device))[0]
@@ -115,12 +116,12 @@ def generate_batch(
             [""] * batch_size,
             padding="max_length",
             max_length=tokenizer.model_max_length,
-            return_tensors="pt"
+            return_tensors="pt",
         )
         uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
         with torch.no_grad():
             text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-    
+
     text_embeddings = text_embeddings.to(device=device).detach()
 
     # Start from pure noise
@@ -130,14 +131,14 @@ def generate_batch(
         (batch_size, n_channels, image_size, image_size),
         device=device,
         generator=generator,
-        dtype=model.module.dtype
+        dtype=model.module.dtype,
     )
 
     # Initialize the arrays
-    log_probs_list = [] #shape: (T, B)
-    latents_list = [] #shape: (T, B, C, H, W)
-    next_latents_list = [] #shape: (T, B, C, H, W)
-    timesteps_list = [] #shape: (T)
+    log_probs_list = []  # shape: (T, B)
+    latents_list = []  # shape: (T, B, C, H, W)
+    next_latents_list = []  # shape: (T, B, C, H, W)
+    timesteps_list = []  # shape: (T)
 
     # Generate trajectory by iterating through the diffusion process
     for t in scheduler.timesteps:
@@ -155,10 +156,14 @@ def generate_batch(
             # Perform classifier-free guidance (optional)
             if guidance_scale:
                 noise_pred_uncond, noise_pred_text = pred_noise.chunk(2)
-                pred_noise = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                pred_noise = noise_pred_uncond + guidance_scale * (
+                    noise_pred_text - noise_pred_uncond
+                )
 
             # Step the scheduler to get the next latents
-            scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=1.0, generator=generator)
+            scheduler_output, log_prob = scheduler.step(
+                pred_noise, t, latents, eta=1.0, generator=generator
+            )
             latents = scheduler_output.prev_sample
 
         # Append the log_prob and new latents to the lists
@@ -167,20 +172,21 @@ def generate_batch(
         timesteps_list.append(t.cpu())
 
     # Convert the lists to tensors and reshape them
-    latents = torch.stack(latents_list).permute(1, 0, 2, 3, 4) #shape: (B, T, C, H, W)
-    next_latents = torch.stack(next_latents_list).permute(1, 0, 2, 3, 4) #shape: (B, T, C, H, W)
-    log_probs = torch.stack(log_probs_list).permute(1, 0) #shape: (B, T)
-    timesteps = torch.tensor(timesteps_list) #shape: (T)
+    latents = torch.stack(latents_list).permute(1, 0, 2, 3, 4)  # shape: (B, T, C, H, W)
+    next_latents = torch.stack(next_latents_list).permute(1, 0, 2, 3, 4)  # shape: (B, T, C, H, W)
+    log_probs = torch.stack(log_probs_list).permute(1, 0)  # shape: (B, T)
+    timesteps = torch.tensor(timesteps_list)  # shape: (T)
 
     return latents, next_latents, log_probs, timesteps, text_embeddings
+
 
 def rescore_batch(
     model,
     scheduler,
-    latents: torch.Tensor, #shape: (B, C, H, W)
-    next_latents: torch.Tensor, #shape: (B, C, H, W)
-    timesteps: torch.Tensor, #shape: (B,)
-    text_embeddings: torch.Tensor, #shape: (2*B, seq_len, dim) if guidance else (B, seq_len, dim)
+    latents: torch.Tensor,  # shape: (B, C, H, W)
+    next_latents: torch.Tensor,  # shape: (B, C, H, W)
+    timesteps: torch.Tensor,  # shape: (B,)
+    text_embeddings: torch.Tensor,  # shape: (2*B, seq_len, dim) if guidance else (B, seq_len, dim)
     guidance_scale: float = 7.5,
 ) -> torch.Tensor:
     """
@@ -200,7 +206,7 @@ def rescore_batch(
 
     # Expand latents for classifier-free guidance (optional)
     latent_model_input = torch.cat([latents] * 2) if guidance_scale else latents
-    
+
     # Get the model prediction
     pred_noise = model(latent_model_input, timesteps, encoder_hidden_states=text_embeddings).sample
 
@@ -209,15 +215,16 @@ def rescore_batch(
         noise_pred_uncond, noise_pred_text = pred_noise.chunk(2)
         pred_noise = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-    # Step the scheduler to get the log prob of next_latents given latents  
+    # Step the scheduler to get the log prob of next_latents given latents
     _, log_prob = scheduler.step(pred_noise, timesteps, latents, next_latents, eta=1.0)
 
     return log_prob
 
+
 def check_model_sync(accelerator, model, tol=1e-6):
     """
     Check if model parameters are synced across GPUs.
-    
+
     Args:
         accelerator: The accelerator object
         model: The model to check
@@ -247,6 +254,7 @@ def check_model_sync(accelerator, model, tol=1e-6):
         else:
             print(f"❌ Some params differ by more than ±{tol}")
 
+
 def evaluate_model(
     step: int,
     pipeline: StableDiffusionPipeline,
@@ -272,13 +280,15 @@ def evaluate_model(
     with torch.no_grad():
         num_batches = math.ceil(num_samples / (batch_size * accelerator.num_processes))
         all_rewards = []
-        all_metrics = {k: [] for k in [
-            'ir_person', 'sex_score', 'sex_score_binary', 'aesthetics_score'
-        ]}
+        all_metrics = {
+            k: [] for k in ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
+        }
 
         for i in range(num_batches):
             # private generator = no impact on global RNG
-            gen = torch.Generator(device=device).manual_seed(fixed_seed + i + accelerator.process_index)
+            gen = torch.Generator(device=device).manual_seed(
+                fixed_seed + i + accelerator.process_index
+            )
 
             _, next_latents, _, _, _ = generate_batch(
                 pipeline, batch_size, device=device, generator=gen, guidance_scale=guidance_scale
@@ -297,16 +307,14 @@ def evaluate_model(
 
             all_rewards.append(accelerator.gather(rewards))
             for k in all_metrics:
-                all_metrics[k].append(
-                    accelerator.gather(scores[k].to(device)).cpu().flatten()
-                )
+                all_metrics[k].append(accelerator.gather(scores[k].to(device)).cpu().flatten())
 
             # collect the images from all ranks
-            gathered = accelerator.gather(images.to(device, non_blocking=True))      
+            gathered = accelerator.gather(images.to(device, non_blocking=True))
 
-            if accelerator.is_main_process:                            # only rank-0 logs
+            if accelerator.is_main_process:  # only rank-0 logs
                 imgs = gathered.cpu().permute(0, 2, 3, 1)
-                imgs = (imgs*255).numpy().astype(np.uint8)
+                imgs = (imgs * 255).numpy().astype(np.uint8)
 
                 wandb_imgs = []
                 for idx, arr in enumerate(imgs):
@@ -320,12 +328,12 @@ def evaluate_model(
         # aggregate & log
         all_rewards = torch.cat(all_rewards)
         metrics = {
-            "eval/reward":     all_rewards.mean().item(),
+            "eval/reward": all_rewards.mean().item(),
             "eval/reward_std": all_rewards.std(unbiased=False).item(),
         }
         for k, v in all_metrics.items():
             vals = torch.cat(v).float()
-            metrics[f"eval/{k}"]     = vals.mean().item()
+            metrics[f"eval/{k}"] = vals.mean().item()
             metrics[f"eval/{k}_std"] = vals.std().item()
 
         if accelerator.is_main_process:
@@ -336,8 +344,9 @@ def evaluate_model(
 
     torch.cuda.empty_cache()
 
+
 def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, float]:
-    with open(path, 'r') as f:
+    with open(path) as f:
         weights_json = json.load(f)
 
     # Accept sparse mapping; check keys are subset
@@ -346,7 +355,9 @@ def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, f
         timestep = int(k)
         weight = abs(float(v))
         if timestep not in scheduler_timesteps:
-            raise ValueError(f"Timestep {timestep} in weights file not found in scheduler timesteps.")
+            raise ValueError(
+                f"Timestep {timestep} in weights file not found in scheduler timesteps."
+            )
         weights[timestep] = weight
 
     # Optionally, ensure every scheduler timestep has a weight (fill zeros or uniform)
@@ -358,32 +369,61 @@ def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, f
 
 if __name__ == "__main__":
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Fine-tune diffusion model with RL')
-    parser.add_argument('--per_gpu_batch_size', type=int, default=5, help='Batch size per GPU')
-    parser.add_argument('--inference_timesteps', type=int, default=50, help='Number of inference timesteps')
-    parser.add_argument('--full_epochs', type=int, default=10, help='Total number of epochs')
-    parser.add_argument('--epochs_per_sampling', type=int, default=2, help='Number of training epochs per sampling')
-    parser.add_argument('--samples_per_epoch', type=int, default=100, help='Number of samples per epoch')
-    parser.add_argument('--timesteps_weights_json', type=str, default=None, help='Path to JSON file with timestep weights for training')
-    parser.add_argument('--num_train_timesteps', type=int, default=None, help='Number of timesteps to uniformly sample for training (default: use all timesteps in range)')
-    parser.add_argument('--learning_rate', type=float, default=1e-6, help='Learning rate for optimizer')
-    parser.add_argument('--eval_every_steps', type=int, default=20, help='Run evaluation every N optimiser steps')
-    parser.add_argument('--eval_samples', type=int, default=20, help='Total #samples drawn in each evaluation')
-    parser.add_argument('--guidance_scale', type=float, default=7.5, help='Guidance scale for sampling')
+    parser = argparse.ArgumentParser(description="Fine-tune diffusion model with RL")
+    parser.add_argument("--per_gpu_batch_size", type=int, default=5, help="Batch size per GPU")
+    parser.add_argument(
+        "--inference_timesteps", type=int, default=50, help="Number of inference timesteps"
+    )
+    parser.add_argument("--full_epochs", type=int, default=10, help="Total number of epochs")
+    parser.add_argument(
+        "--epochs_per_sampling", type=int, default=2, help="Number of training epochs per sampling"
+    )
+    parser.add_argument(
+        "--samples_per_epoch", type=int, default=100, help="Number of samples per epoch"
+    )
+    parser.add_argument(
+        "--timesteps_weights_json",
+        type=str,
+        default=None,
+        help="Path to JSON file with timestep weights for training",
+    )
+    parser.add_argument(
+        "--num_train_timesteps",
+        type=int,
+        default=None,
+        help=(
+            "Number of timesteps to uniformly sample for training "
+            "(default: use all timesteps in range)"
+        ),
+    )
+    parser.add_argument(
+        "--learning_rate", type=float, default=1e-6, help="Learning rate for optimizer"
+    )
+    parser.add_argument(
+        "--eval_every_steps", type=int, default=20, help="Run evaluation every N optimiser steps"
+    )
+    parser.add_argument(
+        "--eval_samples", type=int, default=20, help="Total #samples drawn in each evaluation"
+    )
+    parser.add_argument(
+        "--guidance_scale", type=float, default=7.5, help="Guidance scale for sampling"
+    )
     args = parser.parse_args()
-    
+
     # Create a logger
     logger = get_logger(__name__, log_level="INFO")
-    logging.basicConfig(level=logging.INFO) 
+    logging.basicConfig(level=logging.INFO)
 
     # Calculate gradient accumulation steps based on training timesteps
     if args.num_train_timesteps is not None:
         gradient_accumulation_steps = args.num_train_timesteps
     else:
         gradient_accumulation_steps = args.inference_timesteps - 1
-    
+
     # Initialize accelerator with correct gradient accumulation steps
-    accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps, log_with="wandb")
+    accelerator = Accelerator(
+        gradient_accumulation_steps=gradient_accumulation_steps, log_with="wandb"
+    )
     device = accelerator.device
     logger.info(f"Using device: {device}")
 
@@ -391,18 +431,16 @@ if __name__ == "__main__":
     accelerator.init_trackers(project_name="diffusion-finetune", config=args)
     if accelerator.is_main_process:
         # Log the code to wandb
-        wandb.run.log_code(
-            root=".", 
-            include_fn=lambda p: p.endswith(".py") or p.endswith(".json")
-        )
+        wandb.run.log_code(root=".", include_fn=lambda p: p.endswith(".py") or p.endswith(".json"))
 
     # Define number of samples and batches per GPU
-    num_batches_per_gpu = math.ceil(args.samples_per_epoch / (args.per_gpu_batch_size * accelerator.num_processes))
+    num_batches_per_gpu = math.ceil(
+        args.samples_per_epoch / (args.per_gpu_batch_size * accelerator.num_processes)
+    )
 
     # Load the model and scheduler
     pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        torch_dtype=torch.float16
+        "runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16
     ).to(device)
     pipe.scheduler = CustomDDIMScheduler.from_config(pipe.scheduler.config)
 
@@ -413,10 +451,10 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(pretrained_model.parameters(), lr=args.learning_rate)
 
     # Prepare the model for DDP
-    pretrained_model, optimizer = accelerator.prepare(pretrained_model, optimizer)    
+    pretrained_model, optimizer = accelerator.prepare(pretrained_model, optimizer)
 
     # Update the pipeline to use the wrapped model
-    pipe.unet = pretrained_model               
+    pipe.unet = pretrained_model
 
     # Set the timesteps and move the alphas_cumprod to the device
     scheduler.set_timesteps(args.inference_timesteps, device=device)
@@ -425,10 +463,12 @@ if __name__ == "__main__":
     # Parse timesteps weights
     if args.num_train_timesteps:
         if args.timesteps_weights_json is not None:
-            timestep_weights = parse_timesteps_weights(args.timesteps_weights_json, scheduler.timesteps.tolist())
+            timestep_weights = parse_timesteps_weights(
+                args.timesteps_weights_json, scheduler.timesteps.tolist()
+            )
         else:
             timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
-    timestep_weights[0] = 0.0 # Discard final timestep 
+    timestep_weights[0] = 0.0  # Discard final timestep
 
     # Initialize the optimiation steps
     global_step = 0
@@ -442,24 +482,32 @@ if __name__ == "__main__":
         batch_size=args.per_gpu_batch_size,
         device=device,
         accelerator=accelerator,
-        guidance_scale=args.guidance_scale
+        guidance_scale=args.guidance_scale,
     )
 
     # Sampling + Optimization loop
-    for epoch in tqdm(range(args.full_epochs), desc="Training Epochs", disable=not accelerator.is_main_process):
+    for _epoch in tqdm(
+        range(args.full_epochs), desc="Training Epochs", disable=not accelerator.is_main_process
+    ):
         # Initialize lists to store rewards and batches
         batches = []
         all_rewards = []
         all_metrics = {
-            'ir_person': [],
-            'sex_score': [],
-            'sex_score_binary': [],
-            'aesthetics_score': [],
+            "ir_person": [],
+            "sex_score": [],
+            "sex_score_binary": [],
+            "aesthetics_score": [],
         }
 
         # Sampling loop
-        for _ in tqdm(range(num_batches_per_gpu), desc=f"Generating batches of size {args.per_gpu_batch_size}", disable=not accelerator.is_main_process):
-            latents, next_latents, log_probs, timesteps, text_embeddings = generate_batch(pipe, args.per_gpu_batch_size, guidance_scale=args.guidance_scale, device=device)
+        for _ in tqdm(
+            range(num_batches_per_gpu),
+            desc=f"Generating batches of size {args.per_gpu_batch_size}",
+            disable=not accelerator.is_main_process,
+        ):
+            latents, next_latents, log_probs, timesteps, text_embeddings = generate_batch(
+                pipe, args.per_gpu_batch_size, guidance_scale=args.guidance_scale, device=device
+            )
 
             # Decode latents to images
             with torch.no_grad():
@@ -489,14 +537,17 @@ if __name__ == "__main__":
         # Compute the reward avg and std in this sampling epoch
         all_rewards = torch.cat(all_rewards)
         global_mean = all_rewards.mean()
-        global_std  = all_rewards.std(unbiased=False)
+        global_std = all_rewards.std(unbiased=False)
 
         # Log the metrics for this epoch
         if accelerator.is_main_process:
             logger.info(f"Average reward: {global_mean.item()}")
 
             # Concatenate and compute mean for each metric
-            metrics_to_log = {'train/reward': global_mean.item(), 'train/reward_std': global_std.item()}
+            metrics_to_log = {
+                "train/reward": global_mean.item(),
+                "train/reward_std": global_std.item(),
+            }
             for k in all_metrics:
                 if all_metrics[k]:  # list of tensors
                     all_values = torch.cat(all_metrics[k])
@@ -507,26 +558,33 @@ if __name__ == "__main__":
 
         # Training loop
         for inner_epoch in range(args.epochs_per_sampling):
-           
-            if args.num_train_timesteps is None: # Use all timesteps in the range
+            if args.num_train_timesteps is None:  # Use all timesteps in the range
                 train_timesteps = [t for t in scheduler.timesteps.tolist() if t != 0]
             else:  # Sample timesteps for this epoch
-                ts, weights = zip(*timestep_weights.items())
+                ts, weights = zip(*timestep_weights.items(), strict=False)
                 weights_tensor = torch.tensor(weights)
-                sampled_indices = torch.multinomial(weights_tensor, args.num_train_timesteps, replacement=True)
+                sampled_indices = torch.multinomial(
+                    weights_tensor, args.num_train_timesteps, replacement=True
+                )
                 train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
             for b, batch in enumerate(batches):
-                logger.info(f"Training step {inner_epoch * len(batches) + b + 1}/{args.epochs_per_sampling * len(batches)} (Inner epoch {inner_epoch+1}/{args.epochs_per_sampling}, Batch {b+1}/{len(batches)})")
+                logger.info(
+                    "Training step "
+                    f"{inner_epoch * len(batches) + b + 1}/"
+                    f"{args.epochs_per_sampling * len(batches)} "
+                    f"(Inner epoch {inner_epoch + 1}/{args.epochs_per_sampling}, "
+                    f"Batch {b + 1}/{len(batches)})"
+                )
 
                 # Unpack the batch
-                latents, next_latents, log_probs, timesteps, rewards, text_embeddings = batch 
+                latents, next_latents, log_probs, timesteps, rewards, text_embeddings = batch
                 text_embeddings = text_embeddings.to(device, non_blocking=True)
 
                 # Create a mapping from timestep to index for quick lookup
                 t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}
-                
-                #Compute the normalized rewards, i.e. advantage
+
+                # Compute the normalized rewards, i.e. advantage
                 advantages = (rewards - global_mean) / global_std
 
                 # Accumulate gradients for each selected timestep of the current batch
@@ -538,13 +596,13 @@ if __name__ == "__main__":
                         nxt_gpu = next_latents[:, t_idx].to(device, non_blocking=True)
                         t_gpu = timesteps[t_idx].to(device, non_blocking=True)
                         new_log_probs = rescore_batch(
-                            pretrained_model, 
-                            scheduler, 
-                            lat_gpu, 
-                            nxt_gpu, 
+                            pretrained_model,
+                            scheduler,
+                            lat_gpu,
+                            nxt_gpu,
                             t_gpu,
                             text_embeddings,
-                            guidance_scale=args.guidance_scale
+                            guidance_scale=args.guidance_scale,
                         )
 
                         # Importance Sampling Ratio
@@ -552,7 +610,9 @@ if __name__ == "__main__":
 
                         # PPO clipping
                         clipped_ratio = torch.clamp(importance_ratio, 1 - 1e-4, 1 + 1e-4)
-                        loss_clip = torch.min(importance_ratio * advantages, clipped_ratio * advantages)
+                        loss_clip = torch.min(
+                            importance_ratio * advantages, clipped_ratio * advantages
+                        )
 
                         # Compute the total loss
                         loss = -loss_clip.mean()
@@ -561,20 +621,32 @@ if __name__ == "__main__":
                         with capture_grad_moments(pretrained_model, accelerator):
                             accelerator.backward(loss)
 
-                        # Log gradient info 
+                        # Log gradient info
                         if accelerator.is_main_process:
-                            stats = capture_grad_moments.result   # dict with N, mean, var, std
-                            accelerator.log({
-                                f"grad_inc_norm/t={t}": stats["std"] * math.sqrt(stats["N"]),
-                                f"grad_inc_mean/t={t}": stats["mean"],
-                                f"grad_inc_std/t={t}":  stats["std"],
-                            }, step=global_step)
+                            stats = capture_grad_moments.result  # dict with N, mean, var, std
+                            accelerator.log(
+                                {
+                                    f"grad_inc_norm/t={t}": stats["std"] * math.sqrt(stats["N"]),
+                                    f"grad_inc_mean/t={t}": stats["mean"],
+                                    f"grad_inc_std/t={t}": stats["std"],
+                                },
+                                step=global_step,
+                            )
 
                         # Free up memory
-                        del lat_gpu, nxt_gpu, t_gpu, loss, new_log_probs, importance_ratio, clipped_ratio
+                        del (
+                            lat_gpu,
+                            nxt_gpu,
+                            t_gpu,
+                            loss,
+                            new_log_probs,
+                            importance_ratio,
+                            clipped_ratio,
+                        )
                         torch.cuda.empty_cache()
-                    
-                        # Step the optimizer after the loss was backpropagated for all the timesteps in all GPUs 
+
+                        # Step optimizer after backpropagating all selected
+                        # timesteps across all GPUs.
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
                         torch.cuda.empty_cache()
@@ -591,7 +663,7 @@ if __name__ == "__main__":
                                     batch_size=args.per_gpu_batch_size,
                                     device=device,
                                     accelerator=accelerator,
-                                    guidance_scale=args.guidance_scale
+                                    guidance_scale=args.guidance_scale,
                                 )
 
                 # Synchronize the processes
@@ -603,16 +675,17 @@ if __name__ == "__main__":
 
     # Save the model and arguments
     import time
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     if accelerator.is_main_process:
         model_to_save = accelerator.unwrap_model(pretrained_model)
         model_dir = f"./final_model_{timestamp}"
         model_to_save.save_pretrained(model_dir)
-        
+
         # Save the arguments as JSON
         args_dict = vars(args)
         with open(f"{model_dir}/training_args.json", "w") as f:
             json.dump(args_dict, f, indent=2)
-        
+
         logger.info(f"Saved model to {model_dir}")
         logger.info(f"Saved training arguments to {model_dir}/training_args.json")
