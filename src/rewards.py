@@ -5,6 +5,12 @@ import torch
 from aesthetics_predictor import AestheticsPredictorV1
 from transformers import CLIPProcessor, logging, pipeline
 
+DEFAULT_REWARD_PROMPT = (
+    "a natural, high-quality portrait photograph of a person with realistic "
+    "facial features, normal hair color, natural expression, and clean "
+    "background"
+)
+
 
 def aesthetics_reward(pil_images):
     if not hasattr(aesthetics_reward, "_init"):
@@ -47,11 +53,11 @@ def gender_reward(pil_images):
     return [m["male"] for m in score_maps]
 
 
-def reward_function(latents_batch):
+def tensor_batch_to_pil_images(latents_batch):
     # Move latents to CPU to save GPU memory
     latents_batch = latents_batch.to("cpu")
 
-    # Convert latents batch to list of PIL images
+    # Convert a tensor batch to list of PIL images
     image_processed = latents_batch.permute(0, 2, 3, 1)
     if image_processed.min() < 0:  # [-1, 1]
         image_processed = (image_processed + 1.0) * 127.5
@@ -59,30 +65,51 @@ def reward_function(latents_batch):
         image_processed = (image_processed) * 255
 
     image_processed = image_processed.numpy().astype(np.uint8)
-    images = [PIL.Image.fromarray(image_processed[i]) for i in range(image_processed.shape[0])]
+    return [PIL.Image.fromarray(image_processed[i]) for i in range(image_processed.shape[0])]
 
-    ir_person = image_reward(
-        images,
-        "a natural, high-quality portrait photograph of a person with realistic "
-        "facial features, normal hair color, natural expression, and clean "
-        "background",
-    )
-    # ir_man = image_reward(images, "sharp, photo-realistic portrait of a man, no noise artifacts")
-    sex_score = gender_reward(images)
-    aesthetics_score = aesthetics_reward(images)
+
+def compute_reward_metrics(pil_images, prompt=DEFAULT_REWARD_PROMPT):
+    ir_person = image_reward(pil_images, prompt)
+    sex_score = gender_reward(pil_images)
+    aesthetics_score = aesthetics_reward(pil_images)
 
     sex_score = torch.tensor(sex_score)
     ir_person = torch.tensor(ir_person)
     aesthetics_score = torch.tensor(aesthetics_score)
 
-    sex_score_binary = (sex_score >= 0.8).float()
+    return {
+        "ir_person": ir_person,
+        "sex_score": sex_score,
+        "aesthetics_score": aesthetics_score,
+    }
 
-    total_score = ir_person + 2 * sex_score_binary
+
+def compute_total_reward(ir_person, sex_score, male_threshold=0.8, gender_weight=2.0):
+    sex_score_binary = (sex_score >= male_threshold).float()
+    total_score = ir_person + gender_weight * sex_score_binary
+
+    return total_score, sex_score_binary
+
+
+def reward_function(
+    latents_batch,
+    prompt=DEFAULT_REWARD_PROMPT,
+    male_threshold=0.8,
+    gender_weight=2.0,
+):
+    images = tensor_batch_to_pil_images(latents_batch)
+    metrics = compute_reward_metrics(images, prompt=prompt)
+    total_score, sex_score_binary = compute_total_reward(
+        metrics["ir_person"],
+        metrics["sex_score"],
+        male_threshold=male_threshold,
+        gender_weight=gender_weight,
+    )
 
     # Return all metrics for logging
     return total_score, {
-        "ir_person": ir_person,
-        "sex_score": sex_score,
+        "ir_person": metrics["ir_person"],
+        "sex_score": metrics["sex_score"],
         "sex_score_binary": sex_score_binary,
-        "aesthetics_score": aesthetics_score,
+        "aesthetics_score": metrics["aesthetics_score"],
     }

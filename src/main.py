@@ -16,7 +16,12 @@ from PIL import Image
 from tqdm import tqdm
 
 from custom_ddim_scheduler import CustomDDIMScheduler
-from rewards import reward_function
+from rewards import (
+    DEFAULT_REWARD_PROMPT,
+    compute_reward_metrics,
+    compute_total_reward,
+    tensor_batch_to_pil_images,
+)
 
 
 @contextlib.contextmanager
@@ -195,6 +200,9 @@ def evaluate_model(
     accelerator: Accelerator,
     fixed_seed: int = 1234,
     save_dir: str = "eval_images",
+    reward_prompt: str = DEFAULT_REWARD_PROMPT,
+    gender_threshold: float = 0.8,
+    gender_weight: float = 2.0,
 ):
     """
     Deterministic evaluation that does not touch the global RNG
@@ -222,7 +230,15 @@ def evaluate_model(
                 model, scheduler, batch_size, device=device, generator=gen
             )
 
-            rewards, scores = reward_function(next_latents[:, -1])
+            images = tensor_batch_to_pil_images(next_latents[:, -1])
+            scores = compute_reward_metrics(images, prompt=reward_prompt)
+            rewards, sex_score_binary = compute_total_reward(
+                scores["ir_person"],
+                scores["sex_score"],
+                male_threshold=gender_threshold,
+                gender_weight=gender_weight,
+            )
+            scores["sex_score_binary"] = sex_score_binary
             rewards = rewards.to(device)
 
             all_rewards.append(accelerator.gather(rewards))
@@ -325,6 +341,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--eval_samples", type=int, default=20, help="Total #samples drawn in each evaluation"
     )
+    parser.add_argument(
+        "--reward_prompt",
+        type=str,
+        default=DEFAULT_REWARD_PROMPT,
+        help="Prompt used by ImageReward scoring.",
+    )
+    parser.add_argument(
+        "--gender_threshold",
+        type=float,
+        default=0.8,
+        help="Male-score threshold used to compute binary gender reward.",
+    )
+    parser.add_argument(
+        "--gender_weight",
+        type=float,
+        default=2.0,
+        help="Weight applied to binary gender reward in total score.",
+    )
     args = parser.parse_args()
 
     # Create a logger
@@ -400,6 +434,9 @@ if __name__ == "__main__":
         batch_size=args.per_gpu_batch_size,
         device=device,
         accelerator=accelerator,
+        reward_prompt=args.reward_prompt,
+        gender_threshold=args.gender_threshold,
+        gender_weight=args.gender_weight,
     )
 
     # Sampling + Optimization loop
@@ -427,7 +464,15 @@ if __name__ == "__main__":
             )
 
             # Get the rewards in the current GPU
-            rewards, scores = reward_function(next_latents[:, -1])
+            images = tensor_batch_to_pil_images(next_latents[:, -1])
+            scores = compute_reward_metrics(images, prompt=args.reward_prompt)
+            rewards, sex_score_binary = compute_total_reward(
+                scores["ir_person"],
+                scores["sex_score"],
+                male_threshold=args.gender_threshold,
+                gender_weight=args.gender_weight,
+            )
+            scores["sex_score_binary"] = sex_score_binary
             rewards = rewards.to(device)
 
             # Gather the rewards and metrics from all GPUs
@@ -582,6 +627,9 @@ if __name__ == "__main__":
                                     batch_size=args.per_gpu_batch_size,
                                     device=device,
                                     accelerator=accelerator,
+                                    reward_prompt=args.reward_prompt,
+                                    gender_threshold=args.gender_threshold,
+                                    gender_weight=args.gender_weight,
                                 )
 
                 # Synchronize the processes
