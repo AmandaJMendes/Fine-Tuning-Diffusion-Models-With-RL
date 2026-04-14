@@ -35,20 +35,16 @@ def gender_reward(pil_images):
     if not hasattr(gender_reward, "_init"):
         logging.set_verbosity_error()
         gender_reward.pipe = pipeline(
-            "image-classification", model="rizvandwiki/gender-classification", device="cpu"
+            "image-classification",
+            model="rizvandwiki/gender-classification",
+            device="cpu",
+            top_k=None,
         )
         gender_reward._init = True
 
     classification = gender_reward.pipe(pil_images)
-
-    scores = []
-    for preds in classification:
-        male_prob = next(p["score"] for p in preds if p["label"] == "male")
-        if male_prob >= 0.8 or male_prob <= 0.2:
-            scores.append(male_prob)
-        else:
-            scores.append(0.0)
-    return scores
+    score_maps = [{pred["label"]: pred["score"] for pred in preds} for preds in classification]
+    return [m["male"] for m in score_maps]
 
 
 def reward_function(latents_batch):
@@ -79,7 +75,7 @@ def reward_function(latents_batch):
     ir_person = torch.tensor(ir_person)
     aesthetics_score = torch.tensor(aesthetics_score)
 
-    sex_score_binary = (sex_score > 0.5).float()
+    sex_score_binary = (sex_score >= 0.8).float()
 
     total_score = ir_person + 2 * sex_score_binary
 
