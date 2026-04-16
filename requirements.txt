@@ -1,6 +1,31 @@
+# Core ML
 torch
 diffusers
-matplotlib
-pandas
 transformers
+accelerate
+
+# Reward models
+image-reward            # imports as ImageReward
+simple-aesthetics-predictor  # imports as aesthetics_predictor
+
+# Data & numerics
+numpy
+pandas
 scipy
+
+# Visualization
+matplotlib
+seaborn
+imageio
+
+# Image processing
+Pillow
+
+# Experiment tracking
+wandb
+
+# Utilities
+tqdm
+
+# Notebook support
+ipykernel
