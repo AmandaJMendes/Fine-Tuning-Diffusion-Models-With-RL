@@ -104,6 +104,6 @@ def snr_weight(
     weights = 1 / (k + snr_vals) ** gamma
 
     timesteps = sorted(df["timestep"].dropna().unique().astype(int))
-    return pd.Series(weights[timesteps], index=timesteps, name="snr_weight")
+    return pd.Series(weights[timesteps], index=pd.Index(timesteps, name="timestep"), name="snr_weight")
 
 
