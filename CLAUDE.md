@@ -19,13 +19,14 @@ Best result: combining SNR-based weighting (reward-agnostic structural prior) wi
 - `src/main.py` — main PPO training loop on DDPM-CelebA-HQ
 - `src/custom_ddim_scheduler.py` — DDIM scheduler extended with log-probability computation, enabling importance sampling
 - `src/rewards.py` — reward pipeline (ImageReward + binary gender score)
-- `timesteps_analysis/perceptual_analysis_csv.py` — distributed computation of ΔR(t) and σ²R(t) metrics
-- `notebooks/reward_metrics.ipynb` — aggregates CSVs into timestep weight JSONs used during training
-- Notebooks under `notebooks/` and `analysis/` that compare sampling strategies
+- `timesteps_analysis/timestep_profiling.py` — distributed computation of ΔR(t) and σ²R(t) metrics
+- `src/timestep_metrics.py` — functions implementing Eqs. 5–7 (reward_sensitivity, reward_variance, snr_weight); consumed by the notebook and compute_weights script
+- `analysis/reward_metrics.ipynb` — aggregates CSVs into timestep weight JSONs used during training
+- `scripts/compute_weights.py` — CLI alternative to the notebook for producing weight JSON files
+- Notebooks under `analysis/` that compare sampling strategies
 
 **Not part of the paper (exploratory/peripheral):**
 - `src/main_sd.py` — Stable Diffusion variant, not used in experiments
-- `timesteps_analysis/perceptual_analysis.py` — single-GPU prototype of the analysis
 - `timesteps_analysis/dummy.py` — synthetic test data generator
 - `utils/` — visualization helpers (GIF creation, LaTeX rendering)
 
@@ -66,19 +67,24 @@ The **timestep sampling distribution p_φ(t)** (Eq. 3) is the variable the paper
 ### Reward-aware metric pipeline
 
 ```
-perceptual_analysis_csv.py
+timestep_profiling.py
   └─ For each image x_0^(i) (N=10):
        For each timestep t ∈ {1..50}:
          Sample M=10 corruptions x_t^(i,j) via forward diffusion
          Denoise deterministically → x̂_0^(i,j)
          Evaluate r(x̂_0^(i,j)) for all three reward models
        Output: CSV rows [image_id, timestep, reward_scores...]
+                → p2_reward/worker_*/scores_per_image_timestep.csv
 
-notebooks/reward_metrics.ipynb
-  └─ Load CSVs from all workers (p2_reward/worker_*/metrics.csv)
-     Compute ΔR(t) = mean_i mean_j |r(x_0^i) − r(x̂_0^(i,j))|   [Eq. 6]
-     Compute σ²R(t) = mean_i Var_j r(x̂_0^(i,j))                  [Eq. 7]
-     Normalize → timestep weight JSON files for --timesteps_weights_json
+src/timestep_metrics.py
+  └─ load_perceptual_analysis_data() — merges worker CSVs
+     reward_sensitivity()  → ΔR(t)   [Eq. 6]
+     reward_variance()     → σ²R(t)  [Eq. 7]
+     snr_weight()          → w_SNR(t) [Eq. 5]
+
+analysis/reward_metrics.ipynb  (or scripts/compute_weights.py)
+  └─ Calls timestep_metrics functions, normalizes
+     → timestep weight JSON files for --timesteps_weights_json
 ```
 
 ### Key files
@@ -88,8 +94,9 @@ notebooks/reward_metrics.ipynb
 | `src/custom_ddim_scheduler.py` | Extends `DDIMScheduler`; `step()` returns the denoised sample **and** a Gaussian log-probability for the transition. This avoids re-running the forward pass during the PPO rescore. |
 | `src/rewards.py` | Loads ImageReward, gender classifier (`rizvandwiki/gender-classification`), LAION aesthetics predictor. Default combined reward: `IR + 2·𝟙[gender ≥ 0.8]`. |
 | `src/main.py` | Full distributed training loop: trajectory collection, reward normalization, PPO updates, W&B logging, evaluation with fixed seeds. |
-| `timesteps_analysis/perceptual_analysis_csv.py` | Multi-worker (torchrun) computation of reward sensitivity and variance across all timesteps. Outputs CSVs to `p2_reward/`. |
-| `notebooks/reward_metrics.ipynb` | Aggregates CSV outputs and generates the timestep weight JSON files consumed by `--timesteps_weights_json` at training time. |
+| `timesteps_analysis/timestep_profiling.py` | Multi-worker (torchrun) computation of reward sensitivity and variance across all timesteps. Outputs CSVs to `p2_reward/worker_*/scores_per_image_timestep.csv`. |
+| `src/timestep_metrics.py` | Pure-function module implementing Eqs. 5–7: `reward_sensitivity`, `reward_variance`, `snr_weight`. Consumed by both the notebook and `scripts/compute_weights.py`. |
+| `analysis/reward_metrics.ipynb` | Aggregates CSV outputs and generates the timestep weight JSON files consumed by `--timesteps_weights_json` at training time. |
 
 ## Commands
 
@@ -107,13 +114,13 @@ Pre-commit hooks run Ruff automatically on `git commit`.
 
 **Step 1 — Compute reward-aware timestep metrics**
 ```bash
-torchrun --nproc_per_node=4 timesteps_analysis/perceptual_analysis_csv.py \
+torchrun --nproc_per_node=4 timesteps_analysis/timestep_profiling.py \
   --num_gen_images 10 \
   --num_denoised_samples 10 \
   --plot_dir p2_reward \
   --batch_size 10
 ```
-Then run `notebooks/reward_metrics.ipynb` to aggregate CSVs and produce weight JSON files.
+Then run `analysis/reward_metrics.ipynb` (or `scripts/compute_weights.py`) to aggregate CSVs and produce weight JSON files.
 
 **Step 2 — Train with a timestep sampling strategy**
 
