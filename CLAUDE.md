@@ -21,7 +21,7 @@ Best result: combining SNR-based weighting (reward-agnostic structural prior) wi
 - `src/rewards.py` — reward pipeline (ImageReward + binary gender score)
 - `timesteps_analysis/timestep_profiling.py` — distributed computation of ΔR(t) and σ²R(t) metrics
 - `src/timestep_metrics.py` — functions implementing Eqs. 5–7 (reward_sensitivity, reward_variance, snr_weight); consumed by the notebook and compute_weights script
-- `analysis/reward_metrics.ipynb` — aggregates CSVs into timestep weight JSONs used during training
+- `analysis/timestep_profiling_analysis.ipynb` — aggregates CSVs into timestep weight JSONs used during training
 - `scripts/compute_weights.py` — CLI alternative to the notebook for producing weight JSON files
 - Notebooks under `analysis/` that compare sampling strategies
 
@@ -82,7 +82,7 @@ src/timestep_metrics.py
      reward_variance()     → σ²R(t)  [Eq. 7]
      snr_weight()          → w_SNR(t) [Eq. 5]
 
-analysis/reward_metrics.ipynb  (or scripts/compute_weights.py)
+analysis/timestep_profiling_analysis.ipynb  (or scripts/compute_weights.py)
   └─ Calls timestep_metrics functions, normalizes
      → timestep weight JSON files for --timesteps_weights_json
 ```
@@ -96,7 +96,7 @@ analysis/reward_metrics.ipynb  (or scripts/compute_weights.py)
 | `src/main.py` | Full distributed training loop: trajectory collection, reward normalization, PPO updates, W&B logging, evaluation with fixed seeds. |
 | `timesteps_analysis/timestep_profiling.py` | Multi-worker (torchrun) computation of reward sensitivity and variance across all timesteps. Outputs CSVs to `p2_reward/worker_*/scores_per_image_timestep.csv`. |
 | `src/timestep_metrics.py` | Pure-function module implementing Eqs. 5–7: `reward_sensitivity`, `reward_variance`, `snr_weight`. Consumed by both the notebook and `scripts/compute_weights.py`. |
-| `analysis/reward_metrics.ipynb` | Aggregates CSV outputs and generates the timestep weight JSON files consumed by `--timesteps_weights_json` at training time. |
+| `analysis/timestep_profiling_analysis.ipynb` | Aggregates CSV outputs and generates the timestep weight JSON files consumed by `--timesteps_weights_json` at training time. |
 
 ## Commands
 
@@ -120,7 +120,7 @@ torchrun --nproc_per_node=4 timesteps_analysis/timestep_profiling.py \
   --plot_dir p2_reward \
   --batch_size 10
 ```
-Then run `analysis/reward_metrics.ipynb` (or `scripts/compute_weights.py`) to aggregate CSVs and produce weight JSON files.
+Then run `analysis/timestep_profiling_analysis.ipynb` (or `scripts/compute_weights.py`) to aggregate CSVs and produce weight JSON files.
 
 **Step 2 — Train with a timestep sampling strategy**
 
