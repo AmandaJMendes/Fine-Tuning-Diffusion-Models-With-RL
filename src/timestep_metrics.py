@@ -1,6 +1,7 @@
 import glob
 import os
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -37,6 +38,40 @@ def load_perceptual_analysis_data(
         all_data.append(df)
 
     return pd.concat(all_data, ignore_index=True)
+
+
+def subsample_data(
+    df: pd.DataFrame,
+    n_images: int,
+    m_reconstructions: int,
+    seed: int = 42,
+    image_ids: list | None = None,
+    sample_ids: list | None = None,
+) -> pd.DataFrame:
+    """
+    Randomly subsample n_images and m_reconstructions from a perceptual analysis DataFrame.
+
+    Args:
+        df: Full DataFrame from load_perceptual_analysis_data.
+        n_images: Number of unique images to sample (ignored if image_ids is provided).
+        m_reconstructions: Number of unique sample_idx values to keep (ignored if sample_ids is provided).
+        seed: Random seed for reproducibility.
+        image_ids: Explicit list of image_idx values to use instead of random sampling.
+        sample_ids: Explicit list of sample_idx values to use instead of random sampling.
+
+    Returns:
+        Filtered DataFrame containing only the sampled images and reconstructions,
+        plus the original (sample_idx=null) rows for the sampled images.
+    """
+    np.random.seed(seed)
+    if image_ids is None:
+        image_ids = np.random.choice(df["image_idx"].dropna().unique(), size=n_images, replace=False)
+    subset_image = df[df["image_idx"].isin(image_ids)]
+    if sample_ids is None:
+        sample_ids = np.random.choice(subset_image["sample_idx"].dropna().unique(), size=m_reconstructions, replace=False)
+    return subset_image[
+        subset_image["sample_idx"].isin(sample_ids) | subset_image["sample_idx"].isnull()
+    ].reset_index(drop=True)
 
 
 def reward_sensitivity(df: pd.DataFrame, reward_col: str = "reward") -> pd.Series:

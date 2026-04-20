@@ -22,6 +22,7 @@ from src.timestep_metrics import (
     reward_sensitivity,
     reward_variance,
     snr_weight,
+    subsample_data,
 )
 
 METRICS = ["sensitivity", "variance", "snr", "snr_x_sensitivity", "snr_x_variance"]
@@ -76,11 +77,35 @@ if __name__ == "__main__":
         default="reward",
         help="Reward column to use. Ignored for --metric snr. (default: reward)",
     )
+    parser.add_argument(
+        "--n_images",
+        type=int,
+        default=None,
+        help="Number of images to subsample. Uses all images if not set.",
+    )
+    parser.add_argument(
+        "--m_reconstructions",
+        type=int,
+        default=None,
+        help="Number of reconstructions per image to subsample. Uses all if not set.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for subsampling (default: 42).",
+    )
     args = parser.parse_args()
 
     print(f"Loading CSVs from {args.data_dir} ...")
     df = load_perceptual_analysis_data(args.data_dir)
     print(f"Loaded {len(df)} rows, {df['image_idx'].nunique()} images.")
+
+    if args.n_images is not None or args.m_reconstructions is not None:
+        n = args.n_images or df["image_idx"].nunique()
+        m = args.m_reconstructions or int(df["sample_idx"].dropna().nunique())
+        df = subsample_data(df, n_images=n, m_reconstructions=m, seed=args.seed)
+        print(f"Subsampled to {df['image_idx'].nunique()} images, {df['sample_idx'].dropna().nunique()} reconstructions.")
 
     print(f"Computing '{args.metric}' weights for reward_col='{args.reward_col}' ...")
     weights = compute_metric(df, args.metric, args.reward_col)
