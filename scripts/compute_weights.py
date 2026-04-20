@@ -110,6 +110,7 @@ if __name__ == "__main__":
     print(f"Computing '{args.metric}' weights for reward_col='{args.reward_col}' ...")
     weights = compute_metric(df, args.metric, args.reward_col)
 
-    output_path = os.path.join(args.output_dir, f"{args.metric}_{args.reward_col}.json")
+    suffix = f"_n{n}_m{m}" if (args.n_images is not None or args.m_reconstructions is not None) else ""
+    output_path = os.path.join(args.output_dir, f"{args.metric}_{args.reward_col}{suffix}.json")
     save_weights(weights, output_path)
     print(f"Saved to {output_path}")
