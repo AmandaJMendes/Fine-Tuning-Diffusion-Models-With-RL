@@ -124,9 +124,9 @@ def check_model_sync(accelerator, model, tol=1e-6):
     if accelerator.is_main_process:
         print(f"Max |Δparam| across all ranks = {max_diff:.3e}")
         if max_diff <= tol:
-            print(f"✅ Parameters agree within ±{tol}")
+            print(f"Parameters agree within ±{tol}")
         else:
-            print(f"❌ Some params differ by more than ±{tol}")
+            print(f"Some params differ by more than ±{tol}")
 
 
 def evaluate_model(

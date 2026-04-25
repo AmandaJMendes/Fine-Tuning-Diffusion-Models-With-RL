@@ -134,7 +134,7 @@ def write_score_row(writer, timestep, image_idx, sample_idx, reward, scores):
 
 
 if __name__ == "__main__":
-    print("🚀 Starting Perceptual Analysis of Denoising at Different Timesteps...")
+    print("Starting perceptual analysis of denoising at different timesteps...")
 
     parser = argparse.ArgumentParser(
         description="Perceptual analysis of denoising at different timesteps."
@@ -184,13 +184,13 @@ if __name__ == "__main__":
     # Set device
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
-    print(f"🖥️ [{local_rank}] Using device: {device}")
+    print(f"[{local_rank}] Using device: {device}")
 
     # Set seed
     torch.manual_seed(23 + local_rank)
     np.random.seed(23 + local_rank)
     torch.cuda.manual_seed_all(23 + local_rank)
-    print(f"🌱 [{local_rank}] Set random seeds to 23 + {local_rank}")
+    print(f"[{local_rank}] Set random seeds to 23 + {local_rank}")
 
     # Create directories
     os.makedirs(plot_dir, exist_ok=True)
@@ -207,7 +207,7 @@ if __name__ == "__main__":
         writer.writeheader()
 
     # Load model and scheduler
-    print(f"🧠 [{local_rank}] Loading model and scheduler...")
+    print(f"[{local_rank}] Loading model and scheduler...")
     scheduler = CustomDDIMScheduler.from_pretrained(
         "google/ddpm-celebahq-256", use_safetensors=True
     )
@@ -215,22 +215,22 @@ if __name__ == "__main__":
     scheduler.set_timesteps(50)
 
     # Generate images
-    print(f"🖼️ [{local_rank}] Generating {num_gen_images} images...")
+    print(f"[{local_rank}] Generating {num_gen_images} images...")
     _, next_latents, _, timesteps = generate_batch(
         model, scheduler, num_gen_images, device
     )  # next_latents: [num_gen_images, timesteps, C, H, W] ; timesteps: [timesteps]
     original_images = next_latents[:, -1]
 
     # SAVE ALL GENERATED IMAGES
-    print(f"💾 [{local_rank}] Saving all generated images as files...")
+    print(f"[{local_rank}] Saving all generated images as files...")
     for img_idx, orig_img in enumerate(original_images):
         save_img_path = os.path.join(original_images_dir, f"gen_image_{img_idx}.png")
         save_tensor_as_image(orig_img.cpu(), save_img_path)
-    print(f"✅ [{local_rank}] Saved all generated images.")
+    print(f"[{local_rank}] Saved all generated images.")
 
     # Compute and save original reward/IR/gender/aesthetics/sex_score scores
     # for all chosen/generated images.
-    print(f"💾 [{local_rank}] Saving original scores for generated images...")
+    print(f"[{local_rank}] Saving original scores for generated images...")
     original_rewards, original_scores = reward_function(
         original_images
     )  # original_images: [num_gen_images, C, H, W]
@@ -250,10 +250,10 @@ if __name__ == "__main__":
                 reward=original_rewards[img_idx],
                 scores=per_sample_scores,
             )
-    print(f"💾 [{local_rank}] Original scores for all generated images saved.")
+    print(f"[{local_rank}] Original scores for all generated images saved.")
 
     # Denoise from intermediate timesteps, for each image
-    print(f"✨ [{local_rank}] Denoising latents for all generated images and timesteps...")
+    print(f"[{local_rank}] Denoising latents for all generated images and timesteps...")
     # Open the CSV file once for writing denoised sample scores
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
@@ -310,7 +310,6 @@ if __name__ == "__main__":
                         scores=per_sample_scores,
                     )
 
-            # 🧹 Free cached GPU memory before next timestep
             torch.cuda.empty_cache()
 
-    print(f"✅ [{local_rank}] Perceptual analysis completed.")
+    print(f"[{local_rank}] Perceptual analysis completed.")
