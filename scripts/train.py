@@ -5,6 +5,8 @@ import logging
 import math
 import os
 
+import yaml
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -245,8 +247,19 @@ def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, f
 
 
 if __name__ == "__main__":
-    # Parse command line arguments
+    # Pre-parse to get --config, then load YAML defaults before full parse
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=str, default=None)
+    pre_args, _ = pre_parser.parse_known_args()
+
+    yaml_defaults = {}
+    if pre_args.config:
+        with open(pre_args.config) as f:
+            yaml_defaults = yaml.safe_load(f) or {}
+
     parser = argparse.ArgumentParser(description="Fine-tune diffusion model with RL")
+    parser.set_defaults(**yaml_defaults)
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
     parser.add_argument("--per_gpu_batch_size", type=int, default=5, help="Batch size per GPU")
     parser.add_argument(
         "--inference_timesteps", type=int, default=50, help="Number of inference timesteps"
@@ -300,6 +313,24 @@ if __name__ == "__main__":
         default=2.0,
         help="Weight applied to binary gender reward in total score.",
     )
+    parser.add_argument(
+        "--model_id",
+        type=str,
+        default="google/ddpm-celebahq-256",
+        help="HuggingFace model ID for the pretrained diffusion model.",
+    )
+    parser.add_argument(
+        "--ppo_clip",
+        type=float,
+        default=1e-4,
+        help="PPO clipping epsilon. Kept tight (1e-4) to prevent catastrophic forgetting.",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="tao-diffusion",
+        help="Weights & Biases project name.",
+    )
     args = parser.parse_args()
 
     if args.num_train_timesteps is not None and args.num_train_timesteps < 1:
@@ -323,7 +354,7 @@ if __name__ == "__main__":
     logger.info(f"Using device: {device}")
 
     # Initialize wandb
-    accelerator.init_trackers(project_name="diffusion-finetune", config=args)
+    accelerator.init_trackers(project_name=args.wandb_project, config=vars(args))
     if accelerator.is_main_process:
         # Log the code to wandb
         wandb.run.log_code(root=".", include_fn=lambda p: p.endswith(".py") or p.endswith(".json"))
@@ -334,10 +365,8 @@ if __name__ == "__main__":
     )
 
     # Load the model and scheduler
-    scheduler = CustomDDIMScheduler.from_pretrained(
-        "google/ddpm-celebahq-256", use_safetensors=True
-    )
-    pretrained_model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
+    scheduler = CustomDDIMScheduler.from_pretrained(args.model_id, use_safetensors=True)
+    pretrained_model = UNet2DModel.from_pretrained(args.model_id).to(device)
 
     # Define the optimizer
     optimizer = torch.optim.AdamW(pretrained_model.parameters(), lr=args.learning_rate)
@@ -516,7 +545,9 @@ if __name__ == "__main__":
                         importance_ratio = torch.exp(new_log_probs - log_probs[:, t_idx].to(device))
 
                         # PPO clipping
-                        clipped_ratio = torch.clamp(importance_ratio, 1 - 1e-4, 1 + 1e-4)
+                        clipped_ratio = torch.clamp(
+                            importance_ratio, 1 - args.ppo_clip, 1 + args.ppo_clip
+                        )
                         loss_clip = torch.min(
                             importance_ratio * advantages, clipped_ratio * advantages
                         )
@@ -589,7 +620,7 @@ if __name__ == "__main__":
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     if accelerator.is_main_process:
         model_to_save = accelerator.unwrap_model(pretrained_model)
-        model_dir = f"./final_model_{timestamp}"
+        model_dir = os.path.join("artifacts", "models", timestamp)
         model_to_save.save_pretrained(model_dir)
 
         # Save the arguments as JSON

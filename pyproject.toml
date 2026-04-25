@@ -27,6 +27,7 @@ dependencies = [
     "wandb>=0.26.0",
     # Utilities
     "tqdm>=4.65.0",
+    "pyyaml>=6.0",
     # Notebook support
     "ipykernel>=6.0.0",
 ]
