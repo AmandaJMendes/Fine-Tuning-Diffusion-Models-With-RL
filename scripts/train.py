@@ -15,8 +15,8 @@ from diffusers import UNet2DModel
 from PIL import Image
 from tqdm import tqdm
 
-from custom_ddim_scheduler import CustomDDIMScheduler
-from rewards import (
+from src.custom_ddim_scheduler import CustomDDIMScheduler
+from src.rewards import (
     DEFAULT_REWARD_PROMPT,
     compute_reward_metrics,
     compute_total_reward,
