@@ -12,35 +12,27 @@ from src.custom_ddim_scheduler import CustomDDIMScheduler
 from src.sampling import generate_batch
 from src.rewards import reward_function
 
+SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
+
 
 def add_noise(x0, n_samples, scheduler, timestep, device, generator=None):
     """
     Applies the forward diffusion process using scheduler.add_noise.
     x0: [C,H,W] or [B,C,H,W], assumed in [-1,1]
-    n_samples: int, number of samples to generate
-    timestep: int or torch.LongTensor, ascending (forward)
+    n_samples: int, number of noisy copies to produce
+    timestep: int or torch.LongTensor
     device: torch.device
     generator: torch.Generator, optional
     Returns: [B, C, H, W]
     """
     if x0.dim() == 3:
-        x0 = x0.unsqueeze(0)  # [1, C, H, W]
-    if n_samples is not None:
-        x0 = x0.repeat(n_samples, 1, 1, 1)  # [n_samples, C, H, W]
+        x0 = x0.unsqueeze(0)
+    x0 = x0.repeat(n_samples, 1, 1, 1).to(device)
 
-    x0 = x0.to(device)
-
-    # Convert timestep to a tensor of shape [B] on device
-    if isinstance(timestep, torch.Tensor):
-        t_scalar = int(timestep.item())
-    else:
-        t_scalar = int(timestep)
+    t_scalar = int(timestep.item() if isinstance(timestep, torch.Tensor) else timestep)
     t = torch.full((x0.shape[0],), t_scalar, device=device, dtype=torch.long)
 
-    # Forward noise
     noise = torch.randn(x0.shape, device=device, generator=generator)
-
-    # Use scheduler.add_noise if available
     return scheduler.add_noise(x0, noise, t)
 
 
@@ -88,22 +80,16 @@ def denoise_corrupted_batched(
         end_idx = min(start_idx + batch_size, num_samples)
         latents = corrupted_imgs[start_idx:end_idx].clone()  # Shape: [current_batch_size, C, H, W]
 
-        for t in scheduler.timesteps:  # Timesteps are in descending order
+        for t in scheduler.timesteps:
             if t_start is not None and t > t_start:
                 continue
-            with torch.no_grad():
-                pred_noise = model(latents, t).sample
-                scheduler_output, log_prob = scheduler.step(pred_noise, t, latents, eta=eta)
-                latents = scheduler_output.prev_sample
+            pred_noise = model(latents, t).sample
+            scheduler_output, _ = scheduler.step(pred_noise, t, latents, eta=eta)
+            latents = scheduler_output.prev_sample
 
         all_latents.append(latents.cpu())
 
-    # Concatenate all batches into a single tensor of shape (num_samples, 3, 256, 256)
     return torch.cat(all_latents, dim=0)
-
-
-# Make sure to always write these four scores (or None if they are missing)
-SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
 
 
 def write_score_row(writer, timestep, image_idx, sample_idx, reward, scores):
@@ -115,17 +101,16 @@ def write_score_row(writer, timestep, image_idx, sample_idx, reward, scores):
         "image_idx": int(image_idx),
         "sample_idx": int(sample_idx) if sample_idx is not None else None,
     }
-    val_reward = reward
-    if isinstance(val_reward, torch.Tensor) or isinstance(val_reward, np.ndarray):
-        row["reward"] = float(val_reward)
+    if isinstance(reward, (torch.Tensor, np.ndarray)):
+        row["reward"] = float(reward)
     else:
-        row["reward"] = val_reward
+        row["reward"] = reward
 
     for k in SCORE_KEYS:
         v = scores.get(k)
         if v is None:
             row[k] = None
-        elif isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
+        elif isinstance(v, (torch.Tensor, np.ndarray)):
             row[k] = float(v)
         else:
             row[k] = v
@@ -173,13 +158,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    num_gen_images = args.num_gen_images
-    num_denoised_samples = args.num_denoised_samples
     plot_dir = os.path.join(args.plot_dir, f"worker_{local_rank}")
-    batch_size = args.batch_size
-    plot_every_k = args.plot_every_k
-    num_plot_samples = args.num_plot_samples
-    eta = args.eta
 
     # Set device
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
@@ -215,13 +194,12 @@ if __name__ == "__main__":
     scheduler.set_timesteps(50)
 
     # Generate images
-    print(f"[{local_rank}] Generating {num_gen_images} images...")
+    print(f"[{local_rank}] Generating {args.num_gen_images} images...")
     _, next_latents, _, timesteps = generate_batch(
-        model, scheduler, num_gen_images, device
-    )  # next_latents: [num_gen_images, timesteps, C, H, W] ; timesteps: [timesteps]
+        model, scheduler, args.num_gen_images, device
+    )  # next_latents: [num_gen_images, T, C, H, W] ; timesteps: [T]
     original_images = next_latents[:, -1]
 
-    # SAVE ALL GENERATED IMAGES
     print(f"[{local_rank}] Saving all generated images as files...")
     for img_idx, orig_img in enumerate(original_images):
         save_img_path = os.path.join(original_images_dir, f"gen_image_{img_idx}.png")
@@ -237,7 +215,7 @@ if __name__ == "__main__":
 
     with open(csv_path, "a", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
-        for img_idx in range(num_gen_images):
+        for img_idx in range(args.num_gen_images):
             per_sample_scores = {}
             for k in SCORE_KEYS:
                 arr = original_scores.get(k)
@@ -261,42 +239,36 @@ if __name__ == "__main__":
             tqdm(timesteps, desc=f"Denoising latents for all images [{local_rank}]")
         ):
             plot_this_timestep = (
-                t_idx % plot_every_k == 0 or t_idx == len(timesteps) - 1
-            )  # Also plot at final timestep
+                t_idx % args.plot_every_k == 0 or t_idx == len(timesteps) - 1
+            )  # also plot at the final timestep
 
-            for img_idx in range(num_gen_images):
+            for img_idx in range(args.num_gen_images):
                 destroyed_img_to_t = add_noise(
-                    original_images[img_idx], num_denoised_samples, scheduler, timestep, device
-                )  # shape: [num_samples, C, H, W]
+                    original_images[img_idx], args.num_denoised_samples, scheduler, timestep, device
+                )  # [num_denoised_samples, C, H, W]
 
                 denoised = denoise_corrupted_batched(
                     destroyed_img_to_t,
                     model,
                     scheduler,
-                    batch_size=batch_size,
+                    batch_size=args.batch_size,
                     t_start=timestep,
                     device=device,
-                    eta=eta,
-                )  # denoised: [num_samples, C, H, W]
+                    eta=args.eta,
+                )  # [num_denoised_samples, C, H, W]
 
                 # Compute reward for batch of denoised samples
                 rewards, scores = reward_function(denoised)
 
                 if plot_this_timestep:
-                    # Save up to num_plot_samples reconstructed denoised images
-                    # for this image and timestep.
-                    # Each sample is saved in its own file, identified by
-                    # img_idx, timestep, and sample_idx in the filename.
-                    vis_samples = min(num_plot_samples, denoised.shape[0])
+                    vis_samples = min(args.num_plot_samples, denoised.shape[0])
                     for sample_idx in range(vis_samples):
                         save_path = os.path.join(
                             recon_plots_dir, f"img{img_idx}_t{timestep}_sample{sample_idx}.png"
                         )
                         save_tensor_as_image(denoised[sample_idx].cpu(), save_path)
 
-                # Save per-sample values for every denoised sample (img_idx, t_idx)
-                den_n = denoised.shape[0]
-                for sample_idx in range(den_n):
+                for sample_idx in range(args.num_denoised_samples):
                     per_sample_scores = {}
                     for k in SCORE_KEYS:
                         arr = scores.get(k)
