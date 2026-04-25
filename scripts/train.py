@@ -50,12 +50,14 @@ def capture_grad_moments(model, accelerator):
             h.remove()
 
         # --- all-reduce three scalars ---
+        reduced = {}
         for name, val in zip(("N", "S", "Q"), (N, S, Q), strict=False):
             t = torch.tensor(val, device=accelerator.device)
             accelerator.reduce(t, reduction="sum")
-            locals()[name] = t.item()  # overwrite N, S, Q
+            reduced[name] = t.item()
 
         if accelerator.is_main_process:
+            N, S, Q = reduced["N"], reduced["S"], reduced["Q"]
             if N == 0:
                 stats = dict(N=0, mean=0.0, var=0.0, std=0.0)
             else:
