@@ -26,12 +26,6 @@ def _is_frame_file(filename):
     return filename.endswith(".png") and "sample_" in filename and "_step_" in filename
 
 
-def _has_frames(directory):
-    if not os.path.isdir(directory):
-        return False
-    return any(_is_frame_file(f) for f in os.listdir(directory))
-
-
 def create_grid(pil_imgs, cols=None):
     n = len(pil_imgs)
     cols = cols or ceil(sqrt(n))
@@ -47,20 +41,26 @@ def download_frames(run_path, frames_dir, history_key="eval/samples"):
     os.makedirs(frames_dir, exist_ok=True)
     run = wandb.Api().run(run_path)
 
+    print("Fetching eval step list...")
+    eval_rows = [
+        row for row in run.scan_history(keys=["_step", history_key])
+        if (row.get(history_key) or {}).get("filenames")
+    ]
+    print(f"Found {len(eval_rows)} eval steps.")
+
     samples_dict = {}
-    for row in tqdm.tqdm(run.scan_history(keys=["_step", history_key]), desc="downloading"):
+    for row in tqdm.tqdm(eval_rows, desc="downloading", unit="step"):
         step = row["_step"]
-        filenames = (row.get(history_key) or {}).get("filenames", [])
-        if not filenames:
-            continue
+        filenames = row[history_key]["filenames"]
 
         pil_imgs = []
         for idx, rel in enumerate(filenames):
-            # wandb.File.download() returns str or file-like depending on SDK version
-            local = run.file(rel).download(root=frames_dir, replace=False, exist_ok=True)
-            local_path = local if isinstance(local, str) else local.name
             new_path = os.path.join(frames_dir, f"sample_{idx}_step_{step}.png")
-            os.rename(local_path, new_path)
+            if not os.path.exists(new_path):
+                # wandb.File.download() returns str or file-like depending on SDK version
+                local = run.file(rel).download(root=frames_dir, replace=False, exist_ok=True)
+                local_path = local if isinstance(local, str) else local.name
+                os.rename(local_path, new_path)
             pil_imgs.append(Image.open(new_path).convert("RGB"))
 
         samples_dict[step] = pil_imgs
@@ -73,29 +73,12 @@ def download_frames(run_path, frames_dir, history_key="eval/samples"):
     return samples_dict
 
 
-def load_frames(frames_dir):
-    samples_dict = {}
-
-    for filename in os.listdir(frames_dir):
-        if not _is_frame_file(filename):
-            continue
-        parts = filename.split("_")
-        if len(parts) < 4:
-            continue
-        try:
-            idx = int(parts[1])
-            step = int(parts[3].split(".")[0])
-        except (ValueError, IndexError):
-            continue
-
-        samples_dict.setdefault(step, [])
-        samples_dict[step].append((idx, Image.open(os.path.join(frames_dir, filename)).convert("RGB")))
-
-    return {step: [img for _, img in sorted(pairs)] for step, pairs in samples_dict.items()}
-
-
 def save_gif(samples_dict, path, fps=1):
-    frames = [np.asarray(create_grid(samples_dict[step])) for step in sorted(samples_dict)]
+    sorted_steps = sorted(samples_dict)
+    frames = [
+        np.asarray(create_grid(samples_dict[step]))
+        for step in tqdm.tqdm(sorted_steps, desc="building GIF", unit="frame")
+    ]
     if not frames:
         print("No frames found – skipping GIF.")
         return
@@ -103,13 +86,13 @@ def save_gif(samples_dict, path, fps=1):
     print("GIF saved →", path)
 
 
-def save_evolution_plot(samples_dict, path, k=5):
-    sorted_steps = [s for s in sorted(samples_dict) if s % 100 == 0]
+def save_evolution_plot(samples_dict, path, n_samples=5, step_interval=100):
+    sorted_steps = [s for s in sorted(samples_dict) if s % step_interval == 0]
     if not sorted_steps:
-        print("No steps at 100-step intervals – skipping plot.")
+        print(f"No steps at {step_interval}-step intervals – skipping plot.")
         return
 
-    k = min(k, min(len(samples_dict[s]) for s in sorted_steps))
+    k = min(n_samples, min(len(samples_dict[s]) for s in sorted_steps))
     if k == 0:
         print("No images available – skipping plot.")
         return
@@ -140,24 +123,24 @@ if __name__ == "__main__":
     ap.add_argument("--run_name", required=True, help="W&B run display name (e.g. morning-wave-19)")
     ap.add_argument("--entity", default=DEFAULT_ENTITY)
     ap.add_argument("--project", default=DEFAULT_PROJECT)
-    ap.add_argument("--frames_dir", default=None, help="Frame cache directory (default: frames/<run_name>)")
+    ap.add_argument("--frames_dir", default=None, help="Frame cache directory (default: artifacts/frames/<run_name>)")
     ap.add_argument("--fps", type=int, default=1)
     ap.add_argument("--plot", action="store_true", help="Also save a static evolution plot")
+    ap.add_argument("--n_samples", type=int, default=5, help="Number of sample rows in the evolution plot")
+    ap.add_argument("--step_interval", type=int, default=100, help="Show every N-th step in the evolution plot")
     args = ap.parse_args()
 
     frames_dir = args.frames_dir or os.path.join("artifacts", "frames", args.run_name)
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-    if _has_frames(frames_dir):
-        print(f"Using cached frames in {frames_dir}/")
-        samples = load_frames(frames_dir)
-    else:
-        print(f"Resolving run '{args.run_name}' in {args.entity}/{args.project}...")
-        run_path = _resolve_run_path(args.entity, args.project, args.run_name)
-        print(f"Downloading frames → {frames_dir}/")
-        samples = download_frames(run_path, frames_dir)
+    print(f"Resolving run '{args.run_name}' in {args.entity}/{args.project}...")
+    run_path = _resolve_run_path(args.entity, args.project, args.run_name)
+    samples = download_frames(run_path, frames_dir)
+
+    if not args.plot and (args.n_samples != 5 or args.step_interval != 100):
+        print("Warning: --n_samples and --step_interval have no effect without --plot.")
 
     save_gif(samples, path=os.path.join(ARTIFACTS_DIR, f"{args.run_name}.gif"), fps=args.fps)
 
     if args.plot:
-        save_evolution_plot(samples, path=os.path.join(ARTIFACTS_DIR, f"{args.run_name}_evolution.png"))
+        save_evolution_plot(samples, path=os.path.join(ARTIFACTS_DIR, f"{args.run_name}_evolution.png"), n_samples=args.n_samples, step_interval=args.step_interval)
