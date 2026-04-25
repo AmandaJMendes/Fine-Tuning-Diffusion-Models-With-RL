@@ -1,12 +1,23 @@
-.DS_Store
-.env
-output/
-eval_images/
-*.png
-*.json
-*.safetensors
+# Python
 __pycache__/
+*.pyc
+.venv/
+
+# Environment
+.env
+
+# macOS
+.DS_Store
+
+# Training outputs (scripts/train.py)
+eval_images/
 wandb/
+
+# Model checkpoints (large binaries)
 *.pt
-*.png
-*.gif
+*.safetensors
+
+# Generated artifacts (reproducible via analysis scripts)
+artifacts/comparison/
+artifacts/frames/
+artifacts/gifs/
