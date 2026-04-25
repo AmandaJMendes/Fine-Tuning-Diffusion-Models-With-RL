@@ -300,6 +300,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    if args.num_train_timesteps is not None and args.num_train_timesteps < 1:
+        parser.error("--num_train_timesteps must be >= 1")
+
     # Create a logger
     logger = get_logger(__name__, log_level="INFO")
     logging.basicConfig(level=logging.INFO)
@@ -345,7 +348,7 @@ if __name__ == "__main__":
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
     # Parse timesteps weights
-    if args.num_train_timesteps:
+    if args.num_train_timesteps is not None:
         if args.timesteps_weights_json is not None:
             timestep_weights = parse_timesteps_weights(
                 args.timesteps_weights_json, scheduler.timesteps.tolist()
