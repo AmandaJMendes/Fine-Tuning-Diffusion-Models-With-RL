@@ -22,6 +22,7 @@ from rewards import (
     compute_total_reward,
     tensor_batch_to_pil_images,
 )
+from src.sampling import generate_batch
 
 
 @contextlib.contextmanager
@@ -66,68 +67,6 @@ def capture_grad_moments(model, accelerator):
 
         # expose result to caller
         object.__setattr__(capture_grad_moments, "result", stats)
-
-
-def generate_batch(
-    model, scheduler, batch_size: int, device="cuda:0", generator: torch.Generator | None = None
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Generate a batch of images from the model.
-
-    Args:
-        model:       diffusion network
-        scheduler:   DDIM scheduler
-        batch_size:  number of samples in the batch
-        device:      device on which to place the tensors
-        generator:   optional private RNG (keeps global RNG untouched)  # NEW
-    Returns:
-        latents:      (B, T, C, H, W)
-        next_latents: (B, T, C, H, W)
-        log_probs:    (B, T)
-        timesteps:    (T,)
-    """
-
-    # Start from pure noise
-    n_channels = model.config.in_channels
-    image_size = model.config.sample_size
-    latents = torch.randn(
-        (batch_size, n_channels, image_size, image_size), device=device, generator=generator
-    )
-
-    # Initialize the arrays
-    log_probs_list = []  # shape: (T, B)
-    latents_list = []  # shape: (T, B, C, H, W)
-    next_latents_list = []  # shape: (T, B, C, H, W)
-    timesteps_list = []  # shape: (T)
-
-    # Generate trajectory by iterating through the diffusion process
-    for t in scheduler.timesteps:
-        # Append the latents to the list
-        latents_list.append(latents.cpu())
-
-        # Disable gradient calculation since these samples are not part of the training loop
-        with torch.no_grad():
-            # Get the model prediction
-            pred_noise = model(latents, t).sample
-
-            # Step the scheduler to get the next latents
-            scheduler_output, log_prob = scheduler.step(
-                pred_noise, t, latents, eta=1.0, generator=generator
-            )
-            latents = scheduler_output.prev_sample
-
-        # Append the log_prob and new latents to the lists
-        log_probs_list.append(log_prob.cpu())
-        next_latents_list.append(latents.cpu())
-        timesteps_list.append(t.cpu())
-
-    # Convert the lists to tensors and reshape them
-    latents = torch.stack(latents_list).permute(1, 0, 2, 3, 4)  # shape: (B, T, C, H, W)
-    next_latents = torch.stack(next_latents_list).permute(1, 0, 2, 3, 4)  # shape: (B, T, C, H, W)
-    log_probs = torch.stack(log_probs_list).permute(1, 0)  # shape: (B, T)
-    timesteps = torch.tensor(timesteps_list)  # shape: (T)
-
-    return latents, next_latents, log_probs, timesteps
 
 
 def rescore_batch(
