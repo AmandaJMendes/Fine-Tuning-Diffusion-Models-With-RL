@@ -1,14 +1,7 @@
 import argparse
 import csv
 import os
-import sys
 
-# Use a fallback if __file__ is not defined (e.g., in Jupyter)
-try:
-    notebook_dir = os.path.dirname(__file__)
-except NameError:
-    notebook_dir = os.getcwd()
-sys.path.append(os.path.abspath(os.path.join(notebook_dir, "..")))
 import numpy as np
 import torch
 from diffusers import UNet2DModel
@@ -16,7 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from src.custom_ddim_scheduler import CustomDDIMScheduler
-from src.main import generate_batch
+from src.sampling import generate_batch
 from src.rewards import reward_function
 
 
