@@ -1,21 +1,32 @@
-model_id: google/ddpm-celebahq-256
-wandb_project: tao-diffusion
+# Baseline: gradient accumulated across all denoising steps.
+# No timestep subsampling — every step contributes to each update.
 
-per_gpu_batch_size: 5
-inference_timesteps: 50
-samples_per_epoch: 100
-full_epochs: 100
-epochs_per_sampling: 2
+# Model
+model_id: google/ddpm-celebahq-256       # pretrained DDPM checkpoint
+
+# Trajectory collection
+num_denoising_steps: 50                  # DDIM steps used to generate each trajectory
+num_samples: 100                         # total trajectories collected per outer iteration
+local_batch_size: 5                      # trajectories generated per GPU per forward pass
+
+# Timestep sampling strategy
+timesteps_per_update: null               # null = use all denoising steps (full-trajectory)
+timestep_weights: null                   # null = uniform; path to JSON for reward-aware weighting
+
+# Training
+num_epochs: 100                          # total outer iterations
+inner_epochs: 2                          # PPO optimization passes over each collected batch
 learning_rate: 1.0e-6
-ppo_clip: 1.0e-4
+clip_epsilon: 1.0e-4                     # PPO clipping parameter; tight to avoid forgetting
 
-# Timestep sampling — full trajectory (all 50 steps)
-num_train_timesteps: null
-timesteps_weights_json: null
+# Reward
+reward_prompt: "a natural, high-quality portrait photograph of a person with realistic facial features, normal hair color, natural expression, and clean background"
+gender_threshold: 0.8                    # male-probability threshold for binary gender reward
+gender_weight: 2.0                       # weight on the gender term in the combined reward
 
+# Evaluation
 eval_every_steps: 20
 eval_samples: 20
 
-reward_prompt: "a natural, high-quality portrait photograph of a person with realistic facial features, normal hair color, natural expression, and clean background"
-gender_threshold: 0.8
-gender_weight: 2.0
+# Logging
+wandb_project: tao-diffusion

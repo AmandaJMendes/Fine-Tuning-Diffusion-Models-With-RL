@@ -260,91 +260,117 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune diffusion model with RL")
     parser.set_defaults(**yaml_defaults)
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
-    parser.add_argument("--per_gpu_batch_size", type=int, default=5, help="Batch size per GPU")
+
+    # Model
     parser.add_argument(
-        "--inference_timesteps", type=int, default=50, help="Number of inference timesteps"
-    )
-    parser.add_argument("--full_epochs", type=int, default=10, help="Total number of epochs")
-    parser.add_argument(
-        "--epochs_per_sampling", type=int, default=2, help="Number of training epochs per sampling"
-    )
-    parser.add_argument(
-        "--samples_per_epoch", type=int, default=100, help="Number of samples per epoch"
-    )
-    parser.add_argument(
-        "--timesteps_weights_json",
+        "--model_id",
         type=str,
-        default=None,
-        help="Path to JSON file with timestep weights for training",
+        default="google/ddpm-celebahq-256",
+        help="HuggingFace model ID for the pretrained diffusion model",
+    )
+
+    # Trajectory collection
+    parser.add_argument(
+        "--num_denoising_steps",
+        type=int,
+        default=50,
+        help="Number of DDIM denoising steps used to generate each trajectory",
     )
     parser.add_argument(
-        "--num_train_timesteps",
+        "--num_samples",
+        type=int,
+        default=100,
+        help="Total trajectories collected per outer iteration across all GPUs",
+    )
+    parser.add_argument(
+        "--local_batch_size",
+        type=int,
+        default=5,
+        help="Trajectories generated per GPU per forward pass",
+    )
+
+    # Timestep sampling strategy
+    parser.add_argument(
+        "--timesteps_per_update",
         type=int,
         default=None,
-        help=(
-            "Number of timesteps to uniformly sample for training "
-            "(default: use all timesteps in range)"
-        ),
+        help="Number of timesteps drawn per optimizer step; None uses all denoising steps (full-trajectory baseline)",
     )
     parser.add_argument(
-        "--learning_rate", type=float, default=1e-6, help="Learning rate for optimizer"
+        "--timestep_weights",
+        type=str,
+        default=None,
+        help="Path to JSON file with per-timestep sampling weights; if omitted, uniform weighting is used",
+    )
+
+    # Training
+    parser.add_argument(
+        "--num_epochs", type=int, default=10, help="Total number of outer training iterations"
     )
     parser.add_argument(
-        "--eval_every_steps", type=int, default=20, help="Run evaluation every N optimiser steps"
+        "--inner_epochs",
+        type=int,
+        default=2,
+        help="PPO inner optimization passes over each collected batch",
     )
+    parser.add_argument("--learning_rate", type=float, default=1e-6, help="AdamW learning rate")
     parser.add_argument(
-        "--eval_samples", type=int, default=20, help="Total #samples drawn in each evaluation"
+        "--clip_epsilon",
+        type=float,
+        default=1e-4,
+        help="PPO clipping parameter; kept tight to prevent catastrophic forgetting in diffusion policies",
     )
+
+    # Reward
     parser.add_argument(
         "--reward_prompt",
         type=str,
         default=DEFAULT_REWARD_PROMPT,
-        help="Prompt used by ImageReward scoring.",
+        help="Text prompt passed to ImageReward for scoring",
     )
     parser.add_argument(
         "--gender_threshold",
         type=float,
         default=0.8,
-        help="Male-score threshold used to compute binary gender reward.",
+        help="Male-probability threshold for the binary gender reward term",
     )
     parser.add_argument(
         "--gender_weight",
         type=float,
         default=2.0,
-        help="Weight applied to binary gender reward in total score.",
+        help="Weight on the gender term in the combined reward",
+    )
+
+    # Evaluation
+    parser.add_argument(
+        "--eval_every_steps", type=int, default=20, help="Run evaluation every N optimizer steps"
     )
     parser.add_argument(
-        "--model_id",
-        type=str,
-        default="google/ddpm-celebahq-256",
-        help="HuggingFace model ID for the pretrained diffusion model.",
+        "--eval_samples", type=int, default=20, help="Total number of samples drawn per evaluation"
     )
-    parser.add_argument(
-        "--ppo_clip",
-        type=float,
-        default=1e-4,
-        help="PPO clipping epsilon. Kept tight (1e-4) to prevent catastrophic forgetting.",
-    )
+
+    # Logging
     parser.add_argument(
         "--wandb_project",
         type=str,
         default="tao-diffusion",
-        help="Weights & Biases project name.",
+        help="Weights & Biases project name",
     )
+
     args = parser.parse_args()
 
-    if args.num_train_timesteps is not None and args.num_train_timesteps < 1:
-        parser.error("--num_train_timesteps must be >= 1")
+    if args.timesteps_per_update is not None and args.timesteps_per_update < 1:
+        parser.error("--timesteps_per_update must be >= 1")
 
     # Create a logger
     logger = get_logger(__name__, log_level="INFO")
     logging.basicConfig(level=logging.INFO)
 
     # Calculate gradient accumulation steps based on training timesteps
-    if args.num_train_timesteps is not None:
-        gradient_accumulation_steps = args.num_train_timesteps
+    if args.timesteps_per_update is not None:
+        gradient_accumulation_steps = args.timesteps_per_update
     else:
-        gradient_accumulation_steps = args.inference_timesteps - 1
+        gradient_accumulation_steps = args.num_denoising_steps - 1
 
     # Initialize accelerator with correct gradient accumulation steps
     accelerator = Accelerator(
@@ -361,7 +387,7 @@ if __name__ == "__main__":
 
     # Define number of samples and batches per GPU
     num_batches_per_gpu = math.ceil(
-        args.samples_per_epoch / (args.per_gpu_batch_size * accelerator.num_processes)
+        args.num_samples / (args.local_batch_size * accelerator.num_processes)
     )
 
     # Load the model and scheduler
@@ -375,23 +401,23 @@ if __name__ == "__main__":
     pretrained_model, optimizer = accelerator.prepare(pretrained_model, optimizer)
 
     # Set the timesteps and move the alphas_cumprod to the device
-    scheduler.set_timesteps(args.inference_timesteps, device=device)
+    scheduler.set_timesteps(args.num_denoising_steps, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
     # Parse timesteps weights
-    if args.num_train_timesteps is not None:
-        if args.timesteps_weights_json is not None:
+    if args.timesteps_per_update is not None:
+        if args.timestep_weights is not None:
             timestep_weights = parse_timesteps_weights(
-                args.timesteps_weights_json, scheduler.timesteps.tolist()
+                args.timestep_weights, scheduler.timesteps.tolist()
             )
         else:
             timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
         timestep_weights[0] = 0.0  # Discard final timestep
         print("Timestep weights: ", timestep_weights)
 
-    if accelerator.is_main_process and args.timesteps_weights_json:
+    if accelerator.is_main_process and args.timestep_weights:
         art = wandb.Artifact("timestep-weights", type="config")
-        art.add_file(args.timesteps_weights_json, name="timestep_weights.json")
+        art.add_file(args.timestep_weights, name="timestep_weights.json")
         wandb.log_artifact(art)
 
     # Initialize the optimiation steps
@@ -404,7 +430,7 @@ if __name__ == "__main__":
         model=pretrained_model.module,
         scheduler=scheduler,
         num_samples=args.eval_samples,
-        batch_size=args.per_gpu_batch_size,
+        batch_size=args.local_batch_size,
         device=device,
         accelerator=accelerator,
         reward_prompt=args.reward_prompt,
@@ -414,7 +440,7 @@ if __name__ == "__main__":
 
     # Sampling + Optimization loop
     for _epoch in tqdm(
-        range(args.full_epochs), desc="Training Epochs", disable=not accelerator.is_main_process
+        range(args.num_epochs), desc="Training Epochs", disable=not accelerator.is_main_process
     ):
         # Initialize lists to store rewards and batches
         batches = []
@@ -429,11 +455,11 @@ if __name__ == "__main__":
         # Sampling loop
         for _ in tqdm(
             range(num_batches_per_gpu),
-            desc=f"Generating batches of size {args.per_gpu_batch_size}",
+            desc=f"Generating batches of size {args.local_batch_size}",
             disable=not accelerator.is_main_process,
         ):
             latents, next_latents, log_probs, timesteps = generate_batch(
-                pretrained_model.module, scheduler, args.per_gpu_batch_size, device
+                pretrained_model.module, scheduler, args.local_batch_size, device
             )
 
             # Get the rewards in the current GPU
@@ -485,14 +511,14 @@ if __name__ == "__main__":
             accelerator.log(metrics_to_log, step=global_step)
 
         # Training loop
-        for inner_epoch in range(args.epochs_per_sampling):
-            if args.num_train_timesteps is None:  # Use all timesteps in the range
+        for inner_epoch in range(args.inner_epochs):
+            if args.timesteps_per_update is None:  # Use all timesteps in the range
                 train_timesteps = [t for t in scheduler.timesteps.tolist() if t != 0]
             else:  # Sample timesteps for this epoch
                 ts, weights = zip(*timestep_weights.items(), strict=False)
                 weights_tensor = torch.tensor(weights)
                 sampled_indices = torch.multinomial(
-                    weights_tensor, args.num_train_timesteps, replacement=True
+                    weights_tensor, args.timesteps_per_update, replacement=True
                 )
                 train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
@@ -517,8 +543,8 @@ if __name__ == "__main__":
                 logger.info(
                     "Training step "
                     f"{inner_epoch * len(batches) + b + 1}/"
-                    f"{args.epochs_per_sampling * len(batches)} "
-                    f"(Inner epoch {inner_epoch + 1}/{args.epochs_per_sampling}, "
+                    f"{args.inner_epochs * len(batches)} "
+                    f"(Inner epoch {inner_epoch + 1}/{args.inner_epochs}, "
                     f"Batch {b + 1}/{len(batches)})"
                 )
 
@@ -546,7 +572,7 @@ if __name__ == "__main__":
 
                         # PPO clipping
                         clipped_ratio = torch.clamp(
-                            importance_ratio, 1 - args.ppo_clip, 1 + args.ppo_clip
+                            importance_ratio, 1 - args.clip_epsilon, 1 + args.clip_epsilon
                         )
                         loss_clip = torch.min(
                             importance_ratio * advantages, clipped_ratio * advantages
@@ -599,7 +625,7 @@ if __name__ == "__main__":
                                     model=pretrained_model.module,
                                     scheduler=scheduler,
                                     num_samples=args.eval_samples,
-                                    batch_size=args.per_gpu_batch_size,
+                                    batch_size=args.local_batch_size,
                                     device=device,
                                     accelerator=accelerator,
                                     reward_prompt=args.reward_prompt,

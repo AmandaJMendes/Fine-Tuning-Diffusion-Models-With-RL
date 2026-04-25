@@ -1,21 +1,32 @@
+# Hybrid: reward sensitivity × SNR timestep sampling.
+# Combines structural prior (SNR) with reward-aware sensitivity weighting.
+
+# Model
 model_id: google/ddpm-celebahq-256
-wandb_project: tao-diffusion
 
-per_gpu_batch_size: 5
-inference_timesteps: 50
-samples_per_epoch: 100
-full_epochs: 100
-epochs_per_sampling: 2
+# Trajectory collection
+num_denoising_steps: 50
+num_samples: 100
+local_batch_size: 5
+
+# Timestep sampling strategy
+timesteps_per_update: 20
+timestep_weights: artifacts/weights/snr_x_sensitivity_reward.json
+
+# Training
+num_epochs: 100
+inner_epochs: 2
 learning_rate: 1.0e-6
-ppo_clip: 1.0e-4
+clip_epsilon: 1.0e-4
 
-# Timestep sampling — ΔR(t) × SNR hybrid (best result in paper)
-num_train_timesteps: 20
-timesteps_weights_json: artifacts/weights/snr_x_sensitivity_reward.json
-
-eval_every_steps: 20
-eval_samples: 20
-
+# Reward
 reward_prompt: "a natural, high-quality portrait photograph of a person with realistic facial features, normal hair color, natural expression, and clean background"
 gender_threshold: 0.8
 gender_weight: 2.0
+
+# Evaluation
+eval_every_steps: 20
+eval_samples: 20
+
+# Logging
+wandb_project: tao-diffusion
