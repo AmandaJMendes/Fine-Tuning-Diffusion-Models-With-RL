@@ -130,7 +130,7 @@ if __name__ == "__main__":
         help="Number of independent reconstructions per image per timestep",
     )
     parser.add_argument(
-        "--plot_dir", type=str, default=".", help="Directory to save resulting plots"
+        "--output_dir", type=str, default="artifacts/timestep_profiles", help="Directory to save CSVs and visualizations"
     )
     parser.add_argument(
         "--batch_size", type=int, default=10, help="Batch size for denoising samples"
@@ -142,19 +142,10 @@ if __name__ == "__main__":
         default=3,
         help="Number of denoised samples to plot at each plotted timestep (m)",
     )
-    parser.add_argument(
-        "--eta",
-        type=float,
-        default=0.0,
-        help=(
-            "Eta value (stochasticity parameter) to pass to scheduler.step; "
-            "0 is deterministic (default)"
-        ),
-    )
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    plot_dir = os.path.join(args.plot_dir, f"worker_{local_rank}")
+    plot_dir = os.path.join(args.output_dir, f"worker_{local_rank}")
 
     # Set device
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
@@ -249,7 +240,7 @@ if __name__ == "__main__":
                     batch_size=args.batch_size,
                     timestep=timestep,
                     device=device,
-                    eta=args.eta,
+                    eta=0.0,
                 )  # x̂_0^(i,j): [num_reconstructions, C, H, W]
 
                 # Compute reward for batch of denoised samples
