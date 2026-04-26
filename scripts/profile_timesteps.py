@@ -135,12 +135,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size", type=int, default=10, help="Batch size for denoising samples"
     )
-    parser.add_argument("--plot_every_k", type=int, default=10, help="Plot every k timesteps")
     parser.add_argument(
-        "--num_plot_samples",
-        type=int,
-        default=3,
-        help="Number of denoised samples to plot at each plotted timestep (m)",
+        "--save_visualizations",
+        action="store_true",
+        help="Save all reconstructed images to disk alongside the CSV",
     )
     args = parser.parse_args()
 
@@ -160,10 +158,11 @@ if __name__ == "__main__":
 
     # Create directories
     os.makedirs(plot_dir, exist_ok=True)
-    recon_plots_dir = os.path.join(plot_dir, "recon_plots")
-    original_images_dir = os.path.join(plot_dir, "original_images")
-    os.makedirs(recon_plots_dir, exist_ok=True)
-    os.makedirs(original_images_dir, exist_ok=True)
+    if args.save_visualizations:
+        reconstructions_dir = os.path.join(plot_dir, "reconstructions")
+        original_images_dir = os.path.join(plot_dir, "original_images")
+        os.makedirs(reconstructions_dir, exist_ok=True)
+        os.makedirs(original_images_dir, exist_ok=True)
 
     csv_keys = ["timestep", "image_idx", "sample_idx", "reward"] + SCORE_KEYS
     csv_path = os.path.join(plot_dir, "scores_per_image_timestep.csv")
@@ -187,15 +186,13 @@ if __name__ == "__main__":
     )  # next_latents: [num_gen_images, T, C, H, W] ; timesteps: [T]
     original_images = next_latents[:, -1]
 
-    print(f"[{local_rank}] Saving all generated images as files...")
-    for img_idx, orig_img in enumerate(original_images):
-        save_img_path = os.path.join(original_images_dir, f"gen_image_{img_idx}.png")
-        tensor_batch_to_pil_images(orig_img.unsqueeze(0))[0].save(save_img_path)
-    print(f"[{local_rank}] Saved all generated images.")
+    if args.save_visualizations:
+        for img_idx, orig_img in enumerate(original_images):
+            tensor_batch_to_pil_images(orig_img.unsqueeze(0))[0].save(
+                os.path.join(original_images_dir, f"image_{img_idx}.png")
+            )
 
-    # Compute and save original reward/IR/gender/aesthetics/sex_score scores
-    # for all chosen/generated images.
-    print(f"[{local_rank}] Saving original scores for generated images...")
+    print(f"[{local_rank}] Computing original scores for generated images...")
     original_rewards, original_scores = reward_function(
         original_images
     )  # original_images: [num_gen_images, C, H, W]
@@ -221,13 +218,7 @@ if __name__ == "__main__":
     print(f"[{local_rank}] Computing reconstructions across all timesteps...")
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
-        for t_idx, timestep in enumerate(
-            tqdm(timesteps, desc=f"Timesteps [{local_rank}]")
-        ):
-            plot_this_timestep = (
-                t_idx % args.plot_every_k == 0 or t_idx == len(timesteps) - 1
-            )  # also plot at the final timestep
-
+        for timestep in tqdm(timesteps, desc=f"Timesteps [{local_rank}]"):
             for img_idx in range(args.num_gen_images):
                 corrupted = corrupt_to_timestep(
                     original_images[img_idx], args.num_reconstructions, scheduler, timestep, device
@@ -243,16 +234,13 @@ if __name__ == "__main__":
                     eta=0.0,
                 )  # x̂_0^(i,j): [num_reconstructions, C, H, W]
 
-                # Compute reward for batch of denoised samples
                 rewards, scores = reward_function(denoised)
 
-                if plot_this_timestep:
-                    vis_samples = min(args.num_plot_samples, denoised.shape[0])
-                    for sample_idx in range(vis_samples):
-                        save_path = os.path.join(
-                            recon_plots_dir, f"img{img_idx}_t{timestep}_sample{sample_idx}.png"
+                if args.save_visualizations:
+                    for sample_idx in range(args.num_reconstructions):
+                        tensor_batch_to_pil_images(denoised[sample_idx].unsqueeze(0))[0].save(
+                            os.path.join(reconstructions_dir, f"image_{img_idx}_t{timestep}_{sample_idx}.png")
                         )
-                        tensor_batch_to_pil_images(denoised[sample_idx].unsqueeze(0))[0].save(save_path)
 
                 for sample_idx in range(args.num_reconstructions):
                     per_sample_scores = {}
