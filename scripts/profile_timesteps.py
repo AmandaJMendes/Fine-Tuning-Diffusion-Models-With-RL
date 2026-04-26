@@ -165,7 +165,7 @@ if __name__ == "__main__":
         os.makedirs(original_images_dir, exist_ok=True)
 
     csv_keys = ["timestep", "image_idx", "sample_idx", "reward"] + SCORE_KEYS
-    csv_path = os.path.join(plot_dir, "scores_per_image_timestep.csv")
+    csv_path = os.path.join(plot_dir, "reconstruction_scores.csv")
     # Write header
     with open(csv_path, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)

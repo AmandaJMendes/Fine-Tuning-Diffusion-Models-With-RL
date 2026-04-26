@@ -8,7 +8,7 @@ import torch
 
 def load_perceptual_analysis_data(
     data_dir: str,
-    csv_pattern: str = "worker_*/scores_per_image_timestep.csv",
+    csv_pattern: str = "worker_*/reconstruction_scores.csv",
 ) -> pd.DataFrame:
     """
     Load and concatenate all worker CSVs produced by run_perceptual_analysis.py.
