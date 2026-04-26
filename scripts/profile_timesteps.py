@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from src.custom_ddim_scheduler import CustomDDIMScheduler
 from src.sampling import generate_batch
-from src.rewards import reward_function, tensor_batch_to_pil_images
+from src.rewards import DEFAULT_REWARD_PROMPT, reward_function, tensor_batch_to_pil_images
 
 SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
 
@@ -120,8 +120,23 @@ if __name__ == "__main__":
             "M times deterministically to record rewards."
         )
     )
+    # Model
     parser.add_argument(
-        "--num_gen_images", type=int, default=2, help="Number of images to use for analysis"
+        "--model_id",
+        type=str,
+        default="google/ddpm-celebahq-256",
+        help="HuggingFace model ID for the pretrained diffusion model",
+    )
+
+    # Profiling
+    parser.add_argument(
+        "--num_denoising_steps",
+        type=int,
+        default=50,
+        help="Number of DDIM denoising steps used to generate each trajectory",
+    )
+    parser.add_argument(
+        "--num_images", type=int, default=2, help="Number of images to use for analysis"
     )
     parser.add_argument(
         "--num_reconstructions",
@@ -130,10 +145,32 @@ if __name__ == "__main__":
         help="Number of independent reconstructions per image per timestep",
     )
     parser.add_argument(
-        "--output_dir", type=str, default="artifacts/timestep_profiles", help="Directory to save CSVs and visualizations"
+        "--batch_size", type=int, default=10, help="Batch size for denoising samples"
+    )
+
+    # Reward
+    parser.add_argument(
+        "--reward_prompt",
+        type=str,
+        default=DEFAULT_REWARD_PROMPT,
+        help="Text prompt passed to ImageReward for scoring",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=10, help="Batch size for denoising samples"
+        "--gender_threshold",
+        type=float,
+        default=0.8,
+        help="Male-probability threshold for the binary gender reward term",
+    )
+    parser.add_argument(
+        "--gender_weight",
+        type=float,
+        default=2.0,
+        help="Weight on the gender term in the combined reward",
+    )
+
+    # Output
+    parser.add_argument(
+        "--output_dir", type=str, default="artifacts/timestep_profiles", help="Directory to save CSVs and visualizations"
     )
     parser.add_argument(
         "--save_visualizations",
@@ -173,17 +210,15 @@ if __name__ == "__main__":
 
     # Load model and scheduler
     print(f"[{local_rank}] Loading model and scheduler...")
-    scheduler = CustomDDIMScheduler.from_pretrained(
-        "google/ddpm-celebahq-256", use_safetensors=True
-    )
-    model = UNet2DModel.from_pretrained("google/ddpm-celebahq-256").to(device)
-    scheduler.set_timesteps(50)
+    scheduler = CustomDDIMScheduler.from_pretrained(args.model_id, use_safetensors=True)
+    model = UNet2DModel.from_pretrained(args.model_id).to(device)
+    scheduler.set_timesteps(args.num_denoising_steps)
 
     # Generate images
-    print(f"[{local_rank}] Generating {args.num_gen_images} images...")
+    print(f"[{local_rank}] Generating {args.num_images} images...")
     _, next_latents, _, timesteps = generate_batch(
-        model, scheduler, args.num_gen_images, device
-    )  # next_latents: [num_gen_images, T, C, H, W] ; timesteps: [T]
+        model, scheduler, args.num_images, device
+    )  # next_latents: [num_images, T, C, H, W] ; timesteps: [T]
     original_images = next_latents[:, -1]
 
     if args.save_visualizations:
@@ -194,12 +229,15 @@ if __name__ == "__main__":
 
     print(f"[{local_rank}] Computing original scores for generated images...")
     original_rewards, original_scores = reward_function(
-        original_images
-    )  # original_images: [num_gen_images, C, H, W]
+        original_images,
+        prompt=args.reward_prompt,
+        male_threshold=args.gender_threshold,
+        gender_weight=args.gender_weight,
+    )  # original_images: [num_images, C, H, W]
 
     with open(csv_path, "a", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
-        for img_idx in range(args.num_gen_images):
+        for img_idx in range(args.num_images):
             per_sample_scores = {}
             for k in SCORE_KEYS:
                 arr = original_scores.get(k)
@@ -219,7 +257,7 @@ if __name__ == "__main__":
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
         for timestep in tqdm(timesteps, desc=f"Timesteps [{local_rank}]"):
-            for img_idx in range(args.num_gen_images):
+            for img_idx in range(args.num_images):
                 corrupted = corrupt_to_timestep(
                     original_images[img_idx], args.num_reconstructions, scheduler, timestep, device
                 )  # x_t^(i,j): [num_reconstructions, C, H, W]
@@ -234,7 +272,12 @@ if __name__ == "__main__":
                     eta=0.0,
                 )  # x̂_0^(i,j): [num_reconstructions, C, H, W]
 
-                rewards, scores = reward_function(denoised)
+                rewards, scores = reward_function(
+                    denoised,
+                    prompt=args.reward_prompt,
+                    male_threshold=args.gender_threshold,
+                    gender_weight=args.gender_weight,
+                )
 
                 if args.save_visualizations:
                     for sample_idx in range(args.num_reconstructions):
