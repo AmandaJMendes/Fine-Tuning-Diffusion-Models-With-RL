@@ -5,29 +5,29 @@ import os
 import numpy as np
 import torch
 from diffusers import UNet2DModel
-from PIL import Image
 from tqdm import tqdm
 
 from src.custom_ddim_scheduler import CustomDDIMScheduler
 from src.sampling import generate_batch
-from src.rewards import reward_function
+from src.rewards import reward_function, tensor_batch_to_pil_images
 
 SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
 
 
-def add_noise(x0, n_samples, scheduler, timestep, device, generator=None):
+def corrupt_to_timestep(x0, n_corruptions, scheduler, timestep, device, generator=None):
     """
-    Applies the forward diffusion process using scheduler.add_noise.
+    Forward diffusion: produces n_corruptions independent noisy samples
+    x_t^(i,j) ~ q(x_t | x_0^(i)) at the given timestep.
     x0: [C,H,W] or [B,C,H,W], assumed in [-1,1]
-    n_samples: int, number of noisy copies to produce
+    n_corruptions: int, number of independent corruptions to produce
     timestep: int or torch.LongTensor
     device: torch.device
     generator: torch.Generator, optional
-    Returns: [B, C, H, W]
+    Returns: [n_corruptions, C, H, W]
     """
     if x0.dim() == 3:
         x0 = x0.unsqueeze(0)
-    x0 = x0.repeat(n_samples, 1, 1, 1).to(device)
+    x0 = x0.repeat(n_corruptions, 1, 1, 1).to(device)
 
     t_scalar = int(timestep.item() if isinstance(timestep, torch.Tensor) else timestep)
     t = torch.full((x0.shape[0],), t_scalar, device=device, dtype=torch.long)
@@ -36,34 +36,26 @@ def add_noise(x0, n_samples, scheduler, timestep, device, generator=None):
     return scheduler.add_noise(x0, noise, t)
 
 
-def save_tensor_as_image(tensor, path):
-    """
-    Save a single image tensor ([3,H,W] in [-1,1]) as a PNG image.
-    """
-    img = ((tensor + 1.0) * 127.5).clamp(0, 255).byte()
-    img = img.permute(1, 2, 0).cpu().numpy()
-    img = Image.fromarray(img)
-    img.save(path)
-
 
 @torch.inference_mode()
-def denoise_corrupted_batched(
-    corrupted_imgs, model, scheduler, batch_size=None, t_start=None, device=None, eta=0.0
+def reconstruct_from_timestep(
+    corrupted_imgs, model, scheduler, batch_size=None, timestep=None, device=None, eta=0.0
 ):
     """
-    Optimized batched version that processes all samples together, with configurable batch size.
+    Deterministic reconstruction: denoises x_t^(i,j) back to x̂_0^(i,j)
+    ~ p_θ(x̂_0 | x_t^(i,j)), starting from the given timestep.
 
     Args:
-        corrupted_imgs: Tensor of corrupted images (num_samples, 3, 256, 256)
+        corrupted_imgs: noisy images x_t^(i,j), shape (n_corruptions, C, H, W)
         model: The diffusion model
         scheduler: The DDIM scheduler
-        batch_size: Batch size for processing (default: num_samples, i.e., all at once)
-        t_start: Timestep to start denoising from
+        batch_size: Batch size for processing (default: n_corruptions, i.e., all at once)
+        timestep: Corruption timestep to denoise from
         device: torch.device
-        eta: float, eta parameter for scheduler.step. 0 is deterministic by default.
+        eta: stochasticity parameter for scheduler.step; 0 is deterministic (default)
 
     Returns:
-        Tensor of denoised latents of shape (num_samples, 3, 256, 256)
+        Reconstructed images x̂_0^(i,j), shape (n_corruptions, C, H, W)
     """
     corrupted_imgs = corrupted_imgs.to(device)
     if corrupted_imgs.dim() == 3:
@@ -81,7 +73,7 @@ def denoise_corrupted_batched(
         latents = corrupted_imgs[start_idx:end_idx].clone()  # Shape: [current_batch_size, C, H, W]
 
         for t in scheduler.timesteps:
-            if t_start is not None and t > t_start:
+            if timestep is not None and t > timestep:
                 continue
             pred_noise = model(latents, t).sample
             scheduler_output, _ = scheduler.step(pred_noise, t, latents, eta=eta)
@@ -119,19 +111,23 @@ def write_score_row(writer, timestep, image_idx, sample_idx, reward, scores):
 
 
 if __name__ == "__main__":
-    print("Starting perceptual analysis of denoising at different timesteps...")
+    print("Computing reward-aware timestep metrics...")
 
     parser = argparse.ArgumentParser(
-        description="Perceptual analysis of denoising at different timesteps."
+        description=(
+            "Measures reward sensitivity ΔR(t) and reward variance σ²R(t) across diffusion "
+            "timesteps. Generates N images, corrupts each to every timestep t, and reconstructs "
+            "M times deterministically to record rewards."
+        )
     )
     parser.add_argument(
-        "--num_gen_images", type=int, default=2, help="Number of images to keep for analysis (n)"
+        "--num_gen_images", type=int, default=2, help="Number of images to use for analysis"
     )
     parser.add_argument(
-        "--num_denoised_samples",
+        "--num_reconstructions",
         type=int,
         default=5,
-        help="Number of denoised samples per image per timestep",
+        help="Number of independent reconstructions per image per timestep",
     )
     parser.add_argument(
         "--plot_dir", type=str, default=".", help="Directory to save resulting plots"
@@ -203,7 +199,7 @@ if __name__ == "__main__":
     print(f"[{local_rank}] Saving all generated images as files...")
     for img_idx, orig_img in enumerate(original_images):
         save_img_path = os.path.join(original_images_dir, f"gen_image_{img_idx}.png")
-        save_tensor_as_image(orig_img.cpu(), save_img_path)
+        tensor_batch_to_pil_images(orig_img.unsqueeze(0))[0].save(save_img_path)
     print(f"[{local_rank}] Saved all generated images.")
 
     # Compute and save original reward/IR/gender/aesthetics/sex_score scores
@@ -230,32 +226,31 @@ if __name__ == "__main__":
             )
     print(f"[{local_rank}] Original scores for all generated images saved.")
 
-    # Denoise from intermediate timesteps, for each image
-    print(f"[{local_rank}] Denoising latents for all generated images and timesteps...")
-    # Open the CSV file once for writing denoised sample scores
+    # For each timestep, corrupt each image num_reconstructions times and reconstruct deterministically
+    print(f"[{local_rank}] Computing reconstructions across all timesteps...")
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
         for t_idx, timestep in enumerate(
-            tqdm(timesteps, desc=f"Denoising latents for all images [{local_rank}]")
+            tqdm(timesteps, desc=f"Timesteps [{local_rank}]")
         ):
             plot_this_timestep = (
                 t_idx % args.plot_every_k == 0 or t_idx == len(timesteps) - 1
             )  # also plot at the final timestep
 
             for img_idx in range(args.num_gen_images):
-                destroyed_img_to_t = add_noise(
-                    original_images[img_idx], args.num_denoised_samples, scheduler, timestep, device
-                )  # [num_denoised_samples, C, H, W]
+                corrupted = corrupt_to_timestep(
+                    original_images[img_idx], args.num_reconstructions, scheduler, timestep, device
+                )  # x_t^(i,j): [num_reconstructions, C, H, W]
 
-                denoised = denoise_corrupted_batched(
-                    destroyed_img_to_t,
+                denoised = reconstruct_from_timestep(
+                    corrupted,
                     model,
                     scheduler,
                     batch_size=args.batch_size,
-                    t_start=timestep,
+                    timestep=timestep,
                     device=device,
                     eta=args.eta,
-                )  # [num_denoised_samples, C, H, W]
+                )  # x̂_0^(i,j): [num_reconstructions, C, H, W]
 
                 # Compute reward for batch of denoised samples
                 rewards, scores = reward_function(denoised)
@@ -266,9 +261,9 @@ if __name__ == "__main__":
                         save_path = os.path.join(
                             recon_plots_dir, f"img{img_idx}_t{timestep}_sample{sample_idx}.png"
                         )
-                        save_tensor_as_image(denoised[sample_idx].cpu(), save_path)
+                        tensor_batch_to_pil_images(denoised[sample_idx].unsqueeze(0))[0].save(save_path)
 
-                for sample_idx in range(args.num_denoised_samples):
+                for sample_idx in range(args.num_reconstructions):
                     per_sample_scores = {}
                     for k in SCORE_KEYS:
                         arr = scores.get(k)
@@ -284,4 +279,4 @@ if __name__ == "__main__":
 
             torch.cuda.empty_cache()
 
-    print(f"[{local_rank}] Perceptual analysis completed.")
+    print(f"[{local_rank}] Timestep profiling completed.")
