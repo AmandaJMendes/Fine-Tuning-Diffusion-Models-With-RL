@@ -17,14 +17,14 @@ from diffusers import UNet2DModel
 from PIL import Image
 from tqdm import tqdm
 
-from src.custom_ddim_scheduler import CustomDDIMScheduler
-from src.rewards import (
+from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
+from tao_diffusion.rewards import (
     DEFAULT_REWARD_PROMPT,
     compute_reward_metrics,
     compute_total_reward,
     tensor_batch_to_pil_images,
 )
-from src.sampling import generate_batch
+from tao_diffusion.sampling import generate_batch
 
 
 @contextlib.contextmanager

@@ -7,9 +7,9 @@ import torch
 from diffusers import UNet2DModel
 from tqdm import tqdm
 
-from src.custom_ddim_scheduler import CustomDDIMScheduler
-from src.sampling import generate_batch
-from src.rewards import DEFAULT_REWARD_PROMPT, reward_function, tensor_batch_to_pil_images
+from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
+from tao_diffusion.sampling import generate_batch
+from tao_diffusion.rewards import DEFAULT_REWARD_PROMPT, reward_function, tensor_batch_to_pil_images
 
 SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
 

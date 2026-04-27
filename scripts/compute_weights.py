@@ -17,7 +17,7 @@ import pandas as pd
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.timestep_metrics import (
+from tao_diffusion.timestep_metrics import (
     load_perceptual_analysis_data,
     reward_sensitivity,
     reward_variance,
