@@ -8,8 +8,8 @@ from diffusers import UNet2DModel
 from tqdm import tqdm
 
 from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
-from tao_diffusion.sampling import generate_batch
 from tao_diffusion.rewards import DEFAULT_REWARD_PROMPT, reward_function, tensor_batch_to_pil_images
+from tao_diffusion.sampling import generate_batch
 
 SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
 
@@ -34,7 +34,6 @@ def corrupt_to_timestep(x0, n_corruptions, scheduler, timestep, device, generato
 
     noise = torch.randn(x0.shape, device=device, generator=generator)
     return scheduler.add_noise(x0, noise, t)
-
 
 
 @torch.inference_mode()
@@ -170,7 +169,10 @@ if __name__ == "__main__":
 
     # Output
     parser.add_argument(
-        "--output_dir", type=str, default="artifacts/timestep_profiles", help="Directory to save CSVs and visualizations"
+        "--output_dir",
+        type=str,
+        default="artifacts/timestep_profiles",
+        help="Directory to save CSVs and visualizations",
     )
     parser.add_argument(
         "--save_visualizations",
@@ -253,7 +255,7 @@ if __name__ == "__main__":
             )
     print(f"[{local_rank}] Original scores for all generated images saved.")
 
-    # For each timestep, corrupt each image num_reconstructions times and reconstruct deterministically
+    # For each timestep, corrupt each image num_reconstructions times and reconstruct
     print(f"[{local_rank}] Computing reconstructions across all timesteps...")
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
@@ -282,8 +284,9 @@ if __name__ == "__main__":
 
                 if args.save_visualizations:
                     for sample_idx in range(args.num_reconstructions):
+                        fname = f"image_{img_idx}_t{timestep}_{sample_idx}.png"
                         tensor_batch_to_pil_images(denoised[sample_idx].unsqueeze(0))[0].save(
-                            os.path.join(reconstructions_dir, f"image_{img_idx}_t{timestep}_{sample_idx}.png")
+                            os.path.join(reconstructions_dir, fname)
                         )
 
                 for sample_idx in range(args.num_reconstructions):

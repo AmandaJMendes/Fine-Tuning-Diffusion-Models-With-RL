@@ -54,7 +54,8 @@ def subsample_data(
     Args:
         df: Full DataFrame from load_perceptual_analysis_data.
         n_images: Number of unique images to sample (ignored if image_ids is provided).
-        m_reconstructions: Number of unique sample_idx values to keep (ignored if sample_ids is provided).
+        m_reconstructions: Number of unique sample_idx values to keep (ignored if sample_ids
+            is provided).
         seed: Random seed for reproducibility.
         image_ids: Explicit list of image_idx values to use instead of random sampling.
         sample_ids: Explicit list of sample_idx values to use instead of random sampling.
@@ -65,10 +66,14 @@ def subsample_data(
     """
     np.random.seed(seed)
     if image_ids is None:
-        image_ids = np.random.choice(df["image_idx"].dropna().unique(), size=n_images, replace=False)
+        image_ids = np.random.choice(
+            df["image_idx"].dropna().unique(), size=n_images, replace=False
+        )
     subset_image = df[df["image_idx"].isin(image_ids)]
     if sample_ids is None:
-        sample_ids = np.random.choice(subset_image["sample_idx"].dropna().unique(), size=m_reconstructions, replace=False)
+        sample_ids = np.random.choice(
+            subset_image["sample_idx"].dropna().unique(), size=m_reconstructions, replace=False
+        )
     return subset_image[
         subset_image["sample_idx"].isin(sample_ids) | subset_image["sample_idx"].isnull()
     ].reset_index(drop=True)
@@ -139,6 +144,6 @@ def snr_weight(
     weights = 1 / (k + snr_vals) ** gamma
 
     timesteps = sorted(df["timestep"].dropna().unique().astype(int))
-    return pd.Series(weights[timesteps], index=pd.Index(timesteps, name="timestep"), name="snr_weight")
-
-
+    return pd.Series(
+        weights[timesteps], index=pd.Index(timesteps, name="timestep"), name="snr_weight"
+    )

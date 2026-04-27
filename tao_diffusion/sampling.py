@@ -44,9 +44,9 @@ def generate_batch(
         next_latents_list.append(latents.cpu())
         timesteps_list.append(t.cpu())
 
-    latents = torch.stack(latents_list).permute(1, 0, 2, 3, 4)       # (B, T, C, H, W)
+    latents = torch.stack(latents_list).permute(1, 0, 2, 3, 4)  # (B, T, C, H, W)
     next_latents = torch.stack(next_latents_list).permute(1, 0, 2, 3, 4)  # (B, T, C, H, W)
-    log_probs = torch.stack(log_probs_list).permute(1, 0)              # (B, T)
-    timesteps = torch.tensor(timesteps_list)                           # (T,)
+    log_probs = torch.stack(log_probs_list).permute(1, 0)  # (B, T)
+    timesteps = torch.tensor(timesteps_list)  # (T,)
 
     return latents, next_latents, log_probs, timesteps
