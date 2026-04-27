@@ -184,13 +184,14 @@ if __name__ == "__main__":
 
     # Set device
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+        torch.cuda.manual_seed_all(23 + local_rank)
     print(f"[{local_rank}] Using device: {device}")
 
     # Set seed
     torch.manual_seed(23 + local_rank)
     np.random.seed(23 + local_rank)
-    torch.cuda.manual_seed_all(23 + local_rank)
     print(f"[{local_rank}] Set random seeds to 23 + {local_rank}")
 
     # Create directories
@@ -203,15 +204,13 @@ if __name__ == "__main__":
 
     csv_keys = ["timestep", "image_idx", "sample_idx", "reward"] + SCORE_KEYS
     csv_path = os.path.join(plot_dir, "reconstruction_scores.csv")
-    # Write header
-    with open(csv_path, "w", newline="") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
-        writer.writeheader()
+    with open(csv_path, "w", newline="", buffering=1) as csvfile:
+        csv.DictWriter(csvfile, fieldnames=csv_keys).writeheader()
 
     # Load model and scheduler
     print(f"[{local_rank}] Loading model and scheduler...")
     scheduler = CustomDDIMScheduler.from_pretrained(args.model_id, use_safetensors=True)
-    model = UNet2DModel.from_pretrained(args.model_id).to(device)
+    model = UNet2DModel.from_pretrained(args.model_id).to(device).eval()
     scheduler.set_timesteps(args.num_denoising_steps)
 
     # Generate images
@@ -220,6 +219,8 @@ if __name__ == "__main__":
         model, scheduler, args.num_images, device
     )  # next_latents: [num_images, T, C, H, W] ; timesteps: [T]
     original_images = next_latents[:, -1]
+    del next_latents
+    torch.cuda.empty_cache()
 
     if args.save_visualizations:
         for img_idx, orig_img in enumerate(original_images):
@@ -235,7 +236,7 @@ if __name__ == "__main__":
         gender_weight=args.gender_weight,
     )  # original_images: [num_images, C, H, W]
 
-    with open(csv_path, "a", newline="") as csvfile:
+    with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
         for img_idx in range(args.num_images):
             per_sample_scores = {}
