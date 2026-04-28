@@ -123,7 +123,7 @@ def snr_weight(
     beta_end: float = 0.02,
     n_steps: int = 1000,
     k: float = 1,
-    gamma: float = 2,
+    gamma: float = 1,
 ) -> pd.Series:
     """
     SNR-based timestep weighting w_SNR(t) = 1 / (k + SNR(t))^γ (Eq. 5).
