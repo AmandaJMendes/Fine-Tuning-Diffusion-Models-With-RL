@@ -85,6 +85,9 @@ def rescore_batch(
 
 def check_model_sync(model, accelerator, tol=1e-6):
     """Check that model parameters are identical across all ranks; logs a warning if not."""
+    if accelerator.num_processes == 1:
+        return
+
     _logger = logging.getLogger(__name__)
     model = accelerator.unwrap_model(model)
     device = next(model.parameters()).device
@@ -561,7 +564,8 @@ if __name__ == "__main__":
                                     gender_weight=args.gender_weight,
                                 )
 
-                torch.cuda.synchronize()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 accelerator.wait_for_everyone()
 
     check_model_sync(pretrained_model, accelerator)
