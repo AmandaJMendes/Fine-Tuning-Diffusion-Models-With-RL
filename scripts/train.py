@@ -82,7 +82,7 @@ def rescore_batch(
     return log_prob
 
 
-def check_model_sync(accelerator, model, tol=1e-6):
+def check_model_sync(model, accelerator, tol=1e-6):
     """Verify that model parameters are identical across all ranks."""
     _logger = logging.getLogger(__name__)
     model = accelerator.unwrap_model(model)
@@ -562,7 +562,7 @@ if __name__ == "__main__":
                 torch.cuda.synchronize()
                 accelerator.wait_for_everyone()
 
-    check_model_sync(accelerator, pretrained_model)
+    check_model_sync(pretrained_model, accelerator)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     if accelerator.is_main_process:
