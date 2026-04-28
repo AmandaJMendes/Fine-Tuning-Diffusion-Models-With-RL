@@ -405,7 +405,7 @@ if __name__ == "__main__":
     logger.info("Evaluating model before fine-tuning")
     evaluate_model(
         step=global_step,
-        model=pretrained_model.module,
+        model=accelerator.unwrap_model(pretrained_model),
         scheduler=scheduler,
         num_samples=args.eval_samples,
         batch_size=args.local_batch_size,
@@ -433,7 +433,7 @@ if __name__ == "__main__":
             disable=not accelerator.is_main_process,
         ):
             latents, next_latents, log_probs, timesteps = generate_batch(
-                pretrained_model.module, scheduler, args.local_batch_size, device
+                accelerator.unwrap_model(pretrained_model), scheduler, args.local_batch_size, device
             )
 
             rewards, scores = reward_function(
@@ -551,7 +551,7 @@ if __name__ == "__main__":
                                 logger.info(f"Evaluating model at step {global_step}")
                                 evaluate_model(
                                     step=global_step,
-                                    model=pretrained_model.module,
+                                    model=accelerator.unwrap_model(pretrained_model),
                                     scheduler=scheduler,
                                     num_samples=args.eval_samples,
                                     batch_size=args.local_batch_size,
