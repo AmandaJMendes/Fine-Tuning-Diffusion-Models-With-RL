@@ -28,8 +28,8 @@ from tao_diffusion.sampling import generate_batch
 @contextlib.contextmanager
 def capture_grad_moments(model, accelerator):
     """
-    Logs per-backward grad statistics without extra allocations.
-    Returns a dict on rank-0, None on other ranks.
+    Context manager that captures per-backward grad statistics without extra allocations.
+    Yields a dict that is populated after the backward pass; empty on non-main ranks.
     """
     model = accelerator.unwrap_model(model)
 
@@ -42,9 +42,10 @@ def capture_grad_moments(model, accelerator):
         S += g.sum().item()
         Q += (g * g).sum().item()
 
+    stats = {}
     handles = [p.register_hook(_hook) for p in model.parameters()]
     try:
-        yield
+        yield stats
     finally:
         for h in handles:
             h.remove()
@@ -58,16 +59,11 @@ def capture_grad_moments(model, accelerator):
         if accelerator.is_main_process:
             N, S, Q = reduced["N"], reduced["S"], reduced["Q"]
             if N == 0:
-                stats = dict(N=0, mean=0.0, var=0.0, std=0.0)
+                stats.update(N=0, mean=0.0, var=0.0, std=0.0)
             else:
                 mu = S / N
                 var = max(Q / N - mu * mu, 0.0)
-                stats = dict(N=N, mean=mu, var=var, std=math.sqrt(var))
-        else:
-            stats = None
-
-        # expose result to caller
-        object.__setattr__(capture_grad_moments, "result", stats)
+                stats.update(N=N, mean=mu, var=var, std=math.sqrt(var))
 
 
 def rescore_batch(
@@ -516,16 +512,16 @@ if __name__ == "__main__":
                             importance_ratio * advantages, clipped_ratio * advantages
                         ).mean()
 
-                        with capture_grad_moments(pretrained_model, accelerator):
+                        with capture_grad_moments(pretrained_model, accelerator) as grad_stats:
                             accelerator.backward(loss)
 
                         if accelerator.is_main_process:
-                            stats = capture_grad_moments.result
+                            grad_norm = grad_stats["std"] * math.sqrt(grad_stats["N"])
                             accelerator.log(
                                 {
-                                    f"grad_inc_norm/t={t}": stats["std"] * math.sqrt(stats["N"]),
-                                    f"grad_inc_mean/t={t}": stats["mean"],
-                                    f"grad_inc_std/t={t}": stats["std"],
+                                    f"grad_inc_norm/t={t}": grad_norm,
+                                    f"grad_inc_mean/t={t}": grad_stats["mean"],
+                                    f"grad_inc_std/t={t}": grad_stats["std"],
                                 },
                                 step=global_step,
                             )
