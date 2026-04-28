@@ -324,6 +324,11 @@ if __name__ == "__main__":
         default="tao-diffusion",
         help="Weights & Biases project name",
     )
+    parser.add_argument(
+        "--log_grad_stats",
+        action="store_true",
+        help="Log per-timestep gradient mean/std/norm to W&B (adds hook overhead per backward)",
+    )
 
     args = parser.parse_args()
 
@@ -512,19 +517,21 @@ if __name__ == "__main__":
                             importance_ratio * advantages, clipped_ratio * advantages
                         ).mean()
 
-                        with capture_grad_moments(pretrained_model, accelerator) as grad_stats:
+                        if args.log_grad_stats:
+                            with capture_grad_moments(pretrained_model, accelerator) as grad_stats:
+                                accelerator.backward(loss)
+                            if accelerator.is_main_process:
+                                grad_norm = grad_stats["std"] * math.sqrt(grad_stats["N"])
+                                accelerator.log(
+                                    {
+                                        f"grad_inc_norm/t={t}": grad_norm,
+                                        f"grad_inc_mean/t={t}": grad_stats["mean"],
+                                        f"grad_inc_std/t={t}": grad_stats["std"],
+                                    },
+                                    step=global_step,
+                                )
+                        else:
                             accelerator.backward(loss)
-
-                        if accelerator.is_main_process:
-                            grad_norm = grad_stats["std"] * math.sqrt(grad_stats["N"])
-                            accelerator.log(
-                                {
-                                    f"grad_inc_norm/t={t}": grad_norm,
-                                    f"grad_inc_mean/t={t}": grad_stats["mean"],
-                                    f"grad_inc_std/t={t}": grad_stats["std"],
-                                },
-                                step=global_step,
-                            )
 
                         del lat_gpu, nxt_gpu, t_gpu, loss
                         del new_log_probs, importance_ratio, clipped_ratio
