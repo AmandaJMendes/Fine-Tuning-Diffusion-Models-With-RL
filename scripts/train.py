@@ -29,7 +29,8 @@ from tao_diffusion.sampling import generate_batch
 def capture_grad_moments(model, accelerator):
     """
     Context manager that captures per-backward grad statistics without extra allocations.
-    Yields a dict that is populated after the backward pass; empty on non-main ranks.
+    Yields a dict populated after the backward pass with keys: N, mean, var, std.
+    Empty dict on non-main ranks.
     """
     model = accelerator.unwrap_model(model)
 
@@ -83,7 +84,7 @@ def rescore_batch(
 
 
 def check_model_sync(model, accelerator, tol=1e-6):
-    """Verify that model parameters are identical across all ranks."""
+    """Check that model parameters are identical across all ranks; logs a warning if not."""
     _logger = logging.getLogger(__name__)
     model = accelerator.unwrap_model(model)
     device = next(model.parameters()).device
@@ -113,7 +114,6 @@ def evaluate_model(
     scheduler: CustomDDIMScheduler,
     num_samples: int,
     batch_size: int,
-    device: torch.device,
     accelerator: Accelerator,
     fixed_seed: int = 1234,
     save_dir: str = "artifacts/eval_images",
@@ -139,12 +139,12 @@ def evaluate_model(
 
         for i in range(num_batches):
             # private generator = no impact on global RNG
-            gen = torch.Generator(device=device).manual_seed(
+            gen = torch.Generator(device=accelerator.device).manual_seed(
                 fixed_seed + i + accelerator.process_index
             )
 
             latents, next_latents, _, _ = generate_batch(
-                model, scheduler, batch_size, device=device, generator=gen
+                model, scheduler, batch_size, device=accelerator.device, generator=gen
             )
 
             rewards, scores = reward_function(
@@ -153,13 +153,17 @@ def evaluate_model(
                 male_threshold=gender_threshold,
                 gender_weight=gender_weight,
             )
-            rewards = rewards.to(device)
+            rewards = rewards.to(accelerator.device)
 
             all_rewards.append(accelerator.gather(rewards))
             for k in all_metrics:
-                all_metrics[k].append(accelerator.gather(scores[k].to(device)).cpu().flatten())
+                all_metrics[k].append(
+                    accelerator.gather(scores[k].to(accelerator.device)).cpu().flatten()
+                )
 
-            gathered = accelerator.gather(next_latents[:, -1].to(device, non_blocking=True))
+            gathered = accelerator.gather(
+                next_latents[:, -1].to(accelerator.device, non_blocking=True)
+            )
 
             if accelerator.is_main_process:
                 imgs = gathered.cpu().permute(0, 2, 3, 1)
@@ -405,7 +409,6 @@ if __name__ == "__main__":
         scheduler=scheduler,
         num_samples=args.eval_samples,
         batch_size=args.local_batch_size,
-        device=device,
         accelerator=accelerator,
         reward_prompt=args.reward_prompt,
         gender_threshold=args.gender_threshold,
@@ -552,7 +555,6 @@ if __name__ == "__main__":
                                     scheduler=scheduler,
                                     num_samples=args.eval_samples,
                                     batch_size=args.local_batch_size,
-                                    device=device,
                                     accelerator=accelerator,
                                     reward_prompt=args.reward_prompt,
                                     gender_threshold=args.gender_threshold,
