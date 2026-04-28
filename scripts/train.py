@@ -90,6 +90,7 @@ def rescore_batch(
 
 def check_model_sync(accelerator, model, tol=1e-6):
     """Verify that model parameters are identical across all ranks."""
+    _logger = logging.getLogger(__name__)
     model = accelerator.unwrap_model(model)
     device = next(model.parameters()).device
 
@@ -106,11 +107,10 @@ def check_model_sync(accelerator, model, tol=1e-6):
         max_diff = torch.max(max_diff, diff)
 
     if accelerator.is_main_process:
-        print(f"Max |Δparam| across all ranks = {max_diff:.3e}")
         if max_diff <= tol:
-            print(f"Parameters agree within ±{tol}")
+            _logger.info(f"Model parameters in sync across all ranks (max |Δ| = {max_diff:.3e})")
         else:
-            print(f"Some params differ by more than ±{tol}")
+            _logger.warning(f"Parameter mismatch across ranks detected (max |Δ| = {max_diff:.3e})")
 
 
 def evaluate_model(
@@ -363,6 +363,7 @@ if __name__ == "__main__":
         args.num_samples / (args.local_batch_size * accelerator.num_processes)
     )
 
+    logger.info(f"Loading {args.model_id} ...")
     scheduler = CustomDDIMScheduler.from_pretrained(args.model_id, use_safetensors=True)
     pretrained_model = UNet2DModel.from_pretrained(args.model_id).to(device)
 
@@ -372,20 +373,27 @@ if __name__ == "__main__":
     scheduler.set_timesteps(args.num_denoising_steps, device=device)
     scheduler.alphas_cumprod = scheduler.alphas_cumprod.to(device)
 
+    # Timestep sampling weights (p_φ(t) in the paper)
     if args.timesteps_per_update is not None:
         if args.timestep_weights is not None:
             timestep_weights = parse_timesteps_weights(
                 args.timestep_weights, scheduler.timesteps.tolist()
             )
+            logger.info(
+                f"Timestep sampling: {args.timesteps_per_update} steps/update "
+                f"from {args.timestep_weights}"
+            )
         else:
             timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
+            logger.info(
+                f"Timestep sampling: {args.timesteps_per_update} steps/update, uniform weights"
+            )
         if args.timestep_weights is not None and timestep_weights.get(0, 0.0) != 0.0:
             logger.warning(
                 f"t=0 sampling weight ({timestep_weights[0]:.4f}) overridden to 0 — "
                 "the final denoising step has degenerate log-probability; excluded from training"
             )
         timestep_weights[0] = 0.0  # t=0: final denoising step, log-prob is degenerate
-        logger.info(f"Timestep weights: {timestep_weights}")
 
     if accelerator.is_main_process and args.timestep_weights:
         art = wandb.Artifact("timestep-weights", type="config")
@@ -452,7 +460,7 @@ if __name__ == "__main__":
         global_std = all_rewards.std(unbiased=False)
 
         if accelerator.is_main_process:
-            logger.info(f"Average reward: {global_mean.item()}")
+            logger.info(f"[step {global_step}] avg reward: {global_mean.item():.4f}")
 
             metrics_to_log = {
                 "train/reward": global_mean.item(),
@@ -463,10 +471,9 @@ if __name__ == "__main__":
                     all_values = torch.cat(all_metrics[k])
                     metrics_to_log[f"train/{k}"] = all_values.float().mean().item()
                     metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
-                    logger.info(f"Average {k}: {metrics_to_log[f'train/{k}']}")
             accelerator.log(metrics_to_log, step=global_step)
 
-        for inner_epoch in range(args.inner_epochs):
+        for _inner_epoch in range(args.inner_epochs):
             if args.timesteps_per_update is None:  # full-trajectory baseline: all steps except t=0
                 train_timesteps = [t for t in scheduler.timesteps.tolist() if t != 0]
             else:
@@ -489,14 +496,7 @@ if __name__ == "__main__":
                     step=global_step,
                 )
 
-            for b, batch in enumerate(batches):
-                logger.info(
-                    f"Training step {inner_epoch * len(batches) + b + 1}/"
-                    f"{args.inner_epochs * len(batches)} "
-                    f"(inner epoch {inner_epoch + 1}/{args.inner_epochs}, "
-                    f"batch {b + 1}/{len(batches)})"
-                )
-
+            for batch in batches:
                 latents, next_latents, log_probs, timesteps, rewards = batch
                 t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}
 
@@ -579,5 +579,4 @@ if __name__ == "__main__":
         with open(f"{model_dir}/training_args.json", "w") as f:
             json.dump(args_dict, f, indent=2)
 
-        logger.info(f"Saved model to {model_dir}")
-        logger.info(f"Saved training arguments to {model_dir}/training_args.json")
+        logger.info(f"Model and training arguments saved to {model_dir}")
