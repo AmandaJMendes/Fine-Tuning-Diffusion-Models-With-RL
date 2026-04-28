@@ -20,9 +20,7 @@ from tqdm import tqdm
 from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
 from tao_diffusion.rewards import (
     DEFAULT_REWARD_PROMPT,
-    compute_reward_metrics,
-    compute_total_reward,
-    tensor_batch_to_pil_images,
+    reward_function,
 )
 from tao_diffusion.sampling import generate_batch
 
@@ -153,15 +151,12 @@ def evaluate_model(
                 model, scheduler, batch_size, device=device, generator=gen
             )
 
-            images = tensor_batch_to_pil_images(next_latents[:, -1])
-            scores = compute_reward_metrics(images, prompt=reward_prompt)
-            rewards, sex_score_binary = compute_total_reward(
-                scores["ir_person"],
-                scores["sex_score"],
+            rewards, scores = reward_function(
+                next_latents[:, -1],
+                prompt=reward_prompt,
                 male_threshold=gender_threshold,
                 gender_weight=gender_weight,
             )
-            scores["sex_score_binary"] = sex_score_binary
             rewards = rewards.to(device)
 
             all_rewards.append(accelerator.gather(rewards))
@@ -437,15 +432,12 @@ if __name__ == "__main__":
                 pretrained_model.module, scheduler, args.local_batch_size, device
             )
 
-            images = tensor_batch_to_pil_images(next_latents[:, -1])
-            scores = compute_reward_metrics(images, prompt=args.reward_prompt)
-            rewards, sex_score_binary = compute_total_reward(
-                scores["ir_person"],
-                scores["sex_score"],
+            rewards, scores = reward_function(
+                next_latents[:, -1],
+                prompt=args.reward_prompt,
                 male_threshold=args.gender_threshold,
                 gender_weight=args.gender_weight,
             )
-            scores["sex_score_binary"] = sex_score_binary
             rewards = rewards.to(device)
 
             all_rewards.append(accelerator.gather(rewards))
