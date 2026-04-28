@@ -379,7 +379,12 @@ if __name__ == "__main__":
             )
         else:
             timestep_weights = {timestep: 1.0 for timestep in scheduler.timesteps.tolist()}
-        timestep_weights[0] = 0.0  # t=0 is the final denoising step; log-prob is degenerate there
+        if args.timestep_weights is not None and timestep_weights.get(0, 0.0) != 0.0:
+            logger.warning(
+                f"t=0 sampling weight ({timestep_weights[0]:.4f}) overridden to 0 — "
+                "the final denoising step has degenerate log-probability; excluded from training"
+            )
+        timestep_weights[0] = 0.0  # t=0: final denoising step, log-prob is degenerate
         logger.info(f"Timestep weights: {timestep_weights}")
 
     if accelerator.is_main_process and args.timestep_weights:
