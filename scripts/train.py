@@ -356,7 +356,7 @@ if __name__ == "__main__":
 
     accelerator.init_trackers(project_name=args.wandb_project, config=vars(args))
     if accelerator.is_main_process:
-        wandb.run.log_code(root=".", include_fn=lambda p: p.endswith(".py") or p.endswith(".json"))
+        wandb.run.log_code(root=".", include_fn=lambda p: p.endswith(".py"))
 
     num_batches_per_gpu = math.ceil(
         args.num_samples / (args.local_batch_size * accelerator.num_processes)
