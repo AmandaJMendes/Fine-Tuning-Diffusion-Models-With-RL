@@ -1,8 +1,15 @@
 import torch
+from torch import nn
+
+from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
 
 
 def generate_batch(
-    model, scheduler, batch_size: int, device="cuda:0", generator: torch.Generator | None = None
+    model: nn.Module,
+    scheduler: CustomDDIMScheduler,
+    batch_size: int,
+    device: str | torch.device = "cuda:0",
+    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Generate a batch of images from the model.

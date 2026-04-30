@@ -14,7 +14,14 @@ from tao_diffusion.sampling import generate_batch
 SCORE_KEYS = ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
 
 
-def corrupt_to_timestep(x0, n_corruptions, scheduler, timestep, device, generator=None):
+def corrupt_to_timestep(
+    x0: torch.Tensor,
+    n_corruptions: int,
+    scheduler: CustomDDIMScheduler,
+    timestep: int | torch.Tensor,
+    device: torch.device,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
     """
     Forward diffusion: produces n_corruptions independent noisy samples
     x_t^(i,j) ~ q(x_t | x_0^(i)) at the given timestep.
@@ -38,8 +45,14 @@ def corrupt_to_timestep(x0, n_corruptions, scheduler, timestep, device, generato
 
 @torch.inference_mode()
 def reconstruct_from_timestep(
-    corrupted_imgs, model, scheduler, batch_size=None, timestep=None, device=None, eta=0.0
-):
+    corrupted_imgs: torch.Tensor,
+    model: UNet2DModel,
+    scheduler: CustomDDIMScheduler,
+    batch_size: int | None = None,
+    timestep: int | torch.Tensor | None = None,
+    device: torch.device | None = None,
+    eta: float = 0.0,
+) -> torch.Tensor:
     """
     Deterministic reconstruction: denoises x_t^(i,j) back to x̂_0^(i,j)
     ~ p_θ(x̂_0 | x_t^(i,j)), starting from the given timestep.
@@ -83,7 +96,14 @@ def reconstruct_from_timestep(
     return torch.cat(all_latents, dim=0)
 
 
-def write_score_row(writer, timestep, image_idx, sample_idx, reward, scores):
+def write_score_row(
+    writer: csv.DictWriter,
+    timestep: int | None,
+    image_idx: int,
+    sample_idx: int | None,
+    reward: float | torch.Tensor | np.ndarray,
+    scores: dict,
+) -> None:
     """
     Helper to format and write a single row to CSV.
     """

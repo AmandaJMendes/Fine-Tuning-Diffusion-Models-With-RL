@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import time
+from collections.abc import Generator
 
 import torch
 import torch.distributed as dist
@@ -25,7 +26,9 @@ from tao_diffusion.sampling import generate_batch
 
 
 @contextlib.contextmanager
-def capture_grad_moments(model, accelerator):
+def capture_grad_moments(
+    model: UNet2DModel, accelerator: Accelerator
+) -> Generator[dict, None, None]:
     """
     Context manager that captures per-backward grad statistics without extra allocations.
     Yields a dict populated after the backward pass with keys: N, mean, var, std.
@@ -82,7 +85,7 @@ def rescore_batch(
     return log_prob
 
 
-def check_model_sync(model, accelerator, tol=1e-6):
+def check_model_sync(model: UNet2DModel, accelerator: Accelerator, tol: float = 1e-6) -> None:
     """Check that model parameters are identical across all ranks; logs a warning if not."""
     if accelerator.num_processes == 1:
         return
@@ -193,7 +196,7 @@ def evaluate_model(
     torch.cuda.empty_cache()
 
 
-def parse_timesteps_weights(path: str, scheduler_timesteps: list) -> dict[int, float]:
+def parse_timesteps_weights(path: str, scheduler_timesteps: list[int]) -> dict[int, float]:
     with open(path) as f:
         weights_json = json.load(f)
 
