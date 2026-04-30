@@ -358,7 +358,8 @@ if __name__ == "__main__":
     if accelerator.is_main_process:
         wandb.run.log_code(
             root=".",
-            include_fn=lambda p: p.startswith("tao_diffusion/") or p == os.path.relpath(__file__),
+            include_fn=lambda p: p.startswith(os.path.abspath("tao_diffusion") + "/")
+            or p == os.path.abspath(__file__),
         )
 
     num_batches_per_gpu = math.ceil(
@@ -457,7 +458,7 @@ if __name__ == "__main__":
         # Aggregate rewards across batches and log
         all_rewards = torch.cat(all_rewards)
         global_mean = all_rewards.mean()
-        global_std = all_rewards.std(unbiased=False)
+        global_std = all_rewards.std(unbiased=False).clamp(min=1e-8)
 
         if accelerator.is_main_process:
             logger.info(f"[step {global_step}] avg reward: {global_mean.item():.4f}")
