@@ -93,9 +93,8 @@ def check_model_sync(model, accelerator, tol=1e-6):
 
     max_diff = torch.tensor(0.0, device=device)
     for p in model.parameters():
-        local = p.data
-        global_max = local.clone()
-        global_min = local.clone()
+        global_max = p.data.clone()
+        global_min = p.data.clone()
 
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX)
         dist.all_reduce(global_min, op=dist.ReduceOp.MIN)
