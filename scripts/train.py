@@ -415,6 +415,7 @@ if __name__ == "__main__":
     for _epoch in tqdm(
         range(args.num_epochs), desc="Training Epochs", disable=not accelerator.is_main_process
     ):
+        # collect trajectories: sample x_T → x_0, record latents/log_probs/rewards
         batches = []
         all_rewards = []
         all_metrics = {
@@ -448,6 +449,7 @@ if __name__ == "__main__":
             batches.append((latents, next_latents, log_probs, timesteps, rewards))
             torch.cuda.empty_cache()
 
+        # aggregate rewards across batches and log
         all_rewards = torch.cat(all_rewards)
         global_mean = all_rewards.mean()
         global_std = all_rewards.std(unbiased=False)
@@ -465,10 +467,12 @@ if __name__ == "__main__":
                 metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
             accelerator.log(metrics_to_log, step=global_step)
 
+        # PPO inner optimization over the collected trajectories
         for _inner_epoch in range(args.inner_epochs):
             if args.timesteps_per_update is None:  # full-trajectory baseline: all steps except t=0
                 train_timesteps = [t for t in scheduler.timesteps.tolist() if t != 0]
             else:
+                # each device independently draws t ~ p_φ(t) with replacement
                 ts, weights = zip(*timestep_weights.items(), strict=False)
                 weights_tensor = torch.tensor(weights)
                 sampled_indices = torch.multinomial(
@@ -476,6 +480,7 @@ if __name__ == "__main__":
                 )
                 train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
+            # gather across devices for logging only
             timesteps_tensor = torch.tensor(train_timesteps, device=device)
             all_timesteps = accelerator.gather(timesteps_tensor)
             if accelerator.is_main_process:
@@ -490,7 +495,7 @@ if __name__ == "__main__":
 
             for batch in batches:
                 latents, next_latents, log_probs, timesteps, rewards = batch
-                t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}
+                t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}  # timestep value → trajectory index
 
                 # advantage = normalized reward
                 advantages = (rewards - global_mean) / global_std
@@ -541,7 +546,7 @@ if __name__ == "__main__":
                         optimizer.zero_grad(set_to_none=True)
                         torch.cuda.empty_cache()
 
-                        if accelerator.sync_gradients:
+                        if accelerator.sync_gradients:  # True only after the optimizer actually stepped
                             global_step += 1
                             if global_step % args.eval_every_steps == 0:
                                 logger.info(f"Evaluating model at step {global_step}")
