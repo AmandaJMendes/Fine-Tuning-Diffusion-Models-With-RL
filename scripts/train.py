@@ -140,6 +140,8 @@ def evaluate_model(
         all_metrics = {
             k: [] for k in ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
         }
+        wandb_imgs = []
+        img_idx = 0
 
         for i in range(num_batches):
             # Isolated RNG so eval doesn't perturb the training random state
@@ -165,30 +167,26 @@ def evaluate_model(
                     accelerator.gather(scores[k].to(accelerator.device)).cpu().flatten()
                 )
 
-            gathered = accelerator.gather(
-                next_latents[:, -1].to(accelerator.device, non_blocking=True)
-            )
+            gathered = accelerator.gather(next_latents[:, -1].to(accelerator.device))
 
             if accelerator.is_main_process:
-                wandb_imgs = []
-                for idx, img in enumerate(tensor_batch_to_pil_images(gathered)):
-                    img.save(os.path.join(save_dir, f"step_{step:08d}_{idx:05d}.png"))
+                for img in tensor_batch_to_pil_images(gathered):
+                    img.save(os.path.join(save_dir, f"step_{step:08d}_{img_idx:05d}.png"))
                     wandb_imgs.append(wandb.Image(img))
+                    img_idx += 1
 
-                accelerator.log({"eval/samples": wandb_imgs}, step=step)
-
-        all_rewards = torch.cat(all_rewards)
+        all_rewards = torch.cat(all_rewards)[:num_samples]
         metrics = {
             "eval/reward": all_rewards.mean().item(),
             "eval/reward_std": all_rewards.std(unbiased=False).item(),
         }
         for k, v in all_metrics.items():
-            vals = torch.cat(v).float()
+            vals = torch.cat(v).float()[:num_samples]
             metrics[f"eval/{k}"] = vals.mean().item()
             metrics[f"eval/{k}_std"] = vals.std().item()
 
         if accelerator.is_main_process:
-            accelerator.log(metrics, step=step)
+            accelerator.log({"eval/samples": wandb_imgs[:num_samples], **metrics}, step=step)
 
     if was_training:
         model.train()
@@ -337,6 +335,8 @@ if __name__ == "__main__":
 
     if args.timesteps_per_update is not None and args.timesteps_per_update < 1:
         parser.error("--timesteps_per_update must be >= 1")
+    if args.timestep_weights is not None and args.timesteps_per_update is None:
+        parser.error("--timestep_weights requires --timesteps_per_update")
 
     logger = get_logger(__name__, log_level="INFO")
     logging.basicConfig(level=logging.INFO)
