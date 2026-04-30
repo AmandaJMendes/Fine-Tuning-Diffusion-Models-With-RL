@@ -55,8 +55,7 @@ def gender_reward(pil_images: list[PIL.Image.Image]) -> list[float]:
 
 
 def tensor_batch_to_pil_images(latents_batch: torch.Tensor) -> list[PIL.Image.Image]:
-    # Move latents to CPU to save GPU memory
-    latents_batch = latents_batch.detach().to("cpu", non_blocking=True)
+    latents_batch = latents_batch.detach().cpu()
 
     # Convert a tensor batch to list of PIL images
     image_processed = latents_batch.permute(0, 2, 3, 1)
