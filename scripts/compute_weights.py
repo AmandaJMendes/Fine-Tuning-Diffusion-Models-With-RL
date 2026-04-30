@@ -3,19 +3,16 @@ Compute timestep weight JSONs from perceptual analysis CSVs.
 
 Usage:
     python scripts/compute_weights.py \\
-        --data_dir p2_reward/ \\
-        --output_dir weights/ \\
+        --data_dir artifacts/timestep_profiles/ \\
+        --output_dir artifacts/weights/ \\
         --metric sensitivity \\
         --reward_col reward
 """
 import argparse
 import json
 import os
-import sys
 
 import pandas as pd
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from tao_diffusion.timestep_metrics import (
     load_perceptual_analysis_data,
@@ -56,7 +53,7 @@ if __name__ == "__main__":
         "--data_dir",
         type=str,
         required=True,
-        help="Directory containing worker_* CSV folders from run_perceptual_analysis.py.",
+        help="Directory containing worker_* CSV folders from profile_timesteps.py.",
     )
     parser.add_argument(
         "--output_dir",

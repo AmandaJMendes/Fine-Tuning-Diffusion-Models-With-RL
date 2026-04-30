@@ -6,7 +6,6 @@ import math
 import os
 import time
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import wandb
@@ -14,13 +13,13 @@ import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from diffusers import UNet2DModel
-from PIL import Image
 from tqdm import tqdm
 
 from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
 from tao_diffusion.rewards import (
     DEFAULT_REWARD_PROMPT,
     reward_function,
+    tensor_batch_to_pil_images,
 )
 from tao_diffusion.sampling import generate_batch
 
@@ -169,14 +168,9 @@ def evaluate_model(
             )
 
             if accelerator.is_main_process:
-                imgs = gathered.cpu().permute(0, 2, 3, 1)
-                imgs = ((imgs + 1.0) * 127.5).numpy().astype(np.uint8)
-
                 wandb_imgs = []
-                for idx, arr in enumerate(imgs):
-                    img = Image.fromarray(arr)
-                    fname = os.path.join(save_dir, f"step_{step:08d}_{idx:05d}.png")
-                    img.save(fname)
+                for idx, img in enumerate(tensor_batch_to_pil_images(gathered)):
+                    img.save(os.path.join(save_dir, f"step_{step:08d}_{idx:05d}.png"))
                     wandb_imgs.append(wandb.Image(img))
 
                 accelerator.log({"eval/samples": wandb_imgs}, step=step)
@@ -466,10 +460,9 @@ if __name__ == "__main__":
                 "train/reward_std": global_std.item(),
             }
             for k in all_metrics:
-                if all_metrics[k]:
-                    all_values = torch.cat(all_metrics[k])
-                    metrics_to_log[f"train/{k}"] = all_values.float().mean().item()
-                    metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
+                all_values = torch.cat(all_metrics[k])
+                metrics_to_log[f"train/{k}"] = all_values.float().mean().item()
+                metrics_to_log[f"train/{k}_std"] = all_values.float().std().item()
             accelerator.log(metrics_to_log, step=global_step)
 
         for _inner_epoch in range(args.inner_epochs):
@@ -486,7 +479,7 @@ if __name__ == "__main__":
             timesteps_tensor = torch.tensor(train_timesteps, device=device)
             all_timesteps = accelerator.gather(timesteps_tensor)
             if accelerator.is_main_process:
-                all_ts = all_timesteps.cpu().to(torch.long).tolist()
+                all_ts = all_timesteps.cpu().tolist()
                 timestep_counts = {int(t): 0 for t in scheduler.timesteps.cpu().tolist()}
                 for t in all_ts:
                     timestep_counts[int(t)] += 1
