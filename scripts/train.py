@@ -140,7 +140,7 @@ def evaluate_model(
         }
 
         for i in range(num_batches):
-            # private generator = no impact on global RNG
+            # Isolated RNG so eval doesn't perturb the training random state
             gen = torch.Generator(device=accelerator.device).manual_seed(
                 fixed_seed + i + accelerator.process_index
             )
@@ -415,7 +415,7 @@ if __name__ == "__main__":
     for _epoch in tqdm(
         range(args.num_epochs), desc="Training Epochs", disable=not accelerator.is_main_process
     ):
-        # collect trajectories: sample x_T → x_0, record latents/log_probs/rewards
+        # Collect trajectories: sample x_T → x_0, record latents/log_probs/rewards
         batches = []
         all_rewards = []
         all_metrics = {
@@ -449,7 +449,7 @@ if __name__ == "__main__":
             batches.append((latents, next_latents, log_probs, timesteps, rewards))
             torch.cuda.empty_cache()
 
-        # aggregate rewards across batches and log
+        # Aggregate rewards across batches and log
         all_rewards = torch.cat(all_rewards)
         global_mean = all_rewards.mean()
         global_std = all_rewards.std(unbiased=False)
@@ -469,10 +469,10 @@ if __name__ == "__main__":
 
         # PPO inner optimization over the collected trajectories
         for _inner_epoch in range(args.inner_epochs):
-            if args.timesteps_per_update is None:  # full-trajectory baseline: all steps except t=0
+            if args.timesteps_per_update is None:  # Full-trajectory baseline: all steps except t=0
                 train_timesteps = [t for t in scheduler.timesteps.tolist() if t != 0]
             else:
-                # each device independently draws t ~ p_φ(t) with replacement
+                # Each device independently draws t ~ p_φ(t) with replacement
                 ts, weights = zip(*timestep_weights.items(), strict=False)
                 weights_tensor = torch.tensor(weights)
                 sampled_indices = torch.multinomial(
@@ -480,7 +480,7 @@ if __name__ == "__main__":
                 )
                 train_timesteps = [ts[i] for i in sampled_indices.tolist()]
 
-            # gather across devices for logging only
+            # Gather across devices for logging only
             timesteps_tensor = torch.tensor(train_timesteps, device=device)
             all_timesteps = accelerator.gather(timesteps_tensor)
             if accelerator.is_main_process:
@@ -497,7 +497,7 @@ if __name__ == "__main__":
                 latents, next_latents, log_probs, timesteps, rewards = batch
                 t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}  # timestep value → trajectory index
 
-                # advantage = normalized reward
+                # Advantage = normalized reward
                 advantages = (rewards - global_mean) / global_std
 
                 for t in train_timesteps:
@@ -510,7 +510,7 @@ if __name__ == "__main__":
                             pretrained_model, scheduler, lat_gpu, nxt_gpu, t_gpu
                         )
 
-                        # importance ratio r_t = π_θ / π_θ_old
+                        # Importance ratio r_t = π_θ / π_θ_old
                         importance_ratio = torch.exp(new_log_probs - log_probs[:, t_idx].to(device))
 
                         # PPO-clip objective (ε = clip_epsilon, kept tight for diffusion policies)
@@ -541,7 +541,7 @@ if __name__ == "__main__":
                         del new_log_probs, importance_ratio, clipped_ratio
                         torch.cuda.empty_cache()
 
-                        # optimizer steps once all timesteps for this batch have been accumulated
+                        # Optimizer steps once all timesteps for this batch have been accumulated
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
                         torch.cuda.empty_cache()
