@@ -70,8 +70,8 @@ def capture_grad_moments(
 
 
 def rescore_batch(
-    model,
-    scheduler,
+    model: UNet2DModel,
+    scheduler: CustomDDIMScheduler,
     latents: torch.Tensor,  # (B, C, H, W)
     next_latents: torch.Tensor,  # (B, C, H, W)
     timestep: torch.Tensor,  # scalar — same t broadcast across the batch
@@ -124,7 +124,7 @@ def evaluate_model(
     reward_prompt: str = DEFAULT_REWARD_PROMPT,
     gender_threshold: float = 0.8,
     gender_weight: float = 2.0,
-):
+) -> None:
     """
     Deterministic evaluation that does not touch the global RNG
     (→ training randomness proceeds as usual).

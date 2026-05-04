@@ -103,7 +103,7 @@ def write_score_row(
     image_idx: int,
     sample_idx: int | None,
     reward: float | torch.Tensor | np.ndarray,
-    scores: dict,
+    scores: dict[str, torch.Tensor | np.ndarray | None],
 ) -> None:
     """
     Helper to format and write a single row to CSV.
