@@ -14,7 +14,7 @@ class CustomDDIMScheduler(DDIMScheduler):
         prev_sampled_latent: torch.Tensor | None = None,  # custom argument
         eta: float = 0.0,
         use_clipped_model_output: bool = False,
-        generator=None,
+        generator: torch.Generator | None = None,
         variance_noise: torch.Tensor | None = None,
         return_dict: bool = True,
     ) -> DDIMSchedulerOutput | tuple:
