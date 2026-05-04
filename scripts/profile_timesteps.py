@@ -209,6 +209,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    base, remainder = divmod(args.num_images, world_size)
+    num_images_local = base + (1 if local_rank < remainder else 0)
     plot_dir = os.path.join(args.output_dir, f"worker_{local_rank}")
 
     # Set device
@@ -243,9 +246,9 @@ if __name__ == "__main__":
     scheduler.set_timesteps(args.num_denoising_steps)
 
     # Generate images
-    logger.info("[%d] Generating %d images...", local_rank, args.num_images)
+    logger.info("[%d] Generating %d images...", local_rank, num_images_local)
     _, next_latents, _, timesteps = generate_batch(
-        model, scheduler, args.num_images, device
+        model, scheduler, num_images_local, device
     )  # next_latents: [num_images, T, C, H, W] ; timesteps: [T]
     original_images = next_latents[:, -1]
     del next_latents
@@ -267,7 +270,7 @@ if __name__ == "__main__":
 
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
-        for img_idx in range(args.num_images):
+        for img_idx in range(num_images_local):
             per_sample_scores = {}
             for k in SCORE_KEYS:
                 arr = original_scores.get(k)
@@ -287,7 +290,7 @@ if __name__ == "__main__":
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
         for timestep in tqdm(timesteps, desc=f"Timesteps [{local_rank}]"):
-            for img_idx in range(args.num_images):
+            for img_idx in range(num_images_local):
                 corrupted = corrupt_to_timestep(
                     original_images[img_idx], args.num_reconstructions, scheduler, timestep, device
                 )  # x_t^(i,j): [num_reconstructions, C, H, W]
