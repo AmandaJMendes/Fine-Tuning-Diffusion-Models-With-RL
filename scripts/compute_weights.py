@@ -10,6 +10,7 @@ Usage:
 """
 import argparse
 import json
+import logging
 import os
 
 import pandas as pd
@@ -46,6 +47,13 @@ def save_weights(series: pd.Series, output_path: str) -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger = logging.getLogger(__name__)
+
     parser = argparse.ArgumentParser(
         description="Compute timestep weight JSONs from perceptual analysis CSVs."
     )
@@ -94,20 +102,24 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    print(f"Loading CSVs from {args.data_dir} ...")
+    logger.info("Loading CSVs from %s ...", args.data_dir)
     df = load_perceptual_analysis_data(args.data_dir)
-    print(f"Loaded {len(df)} rows, {df['image_idx'].nunique()} images.")
+    logger.info("Loaded %d rows, %d images.", len(df), df["image_idx"].nunique())
 
     if args.n_images is not None or args.m_reconstructions is not None:
         n = args.n_images or df["image_idx"].nunique()
         m = args.m_reconstructions or int(df["sample_idx"].dropna().nunique())
         df = subsample_data(df, n_images=n, m_reconstructions=m, seed=args.seed)
-        print(f"Subsampled to {df['image_idx'].nunique()} images, {df['sample_idx'].dropna().nunique()} reconstructions.")
+        logger.info(
+            "Subsampled to %d images, %d reconstructions.",
+            df["image_idx"].nunique(),
+            df["sample_idx"].dropna().nunique(),
+        )
 
-    print(f"Computing '{args.metric}' weights for reward_col='{args.reward_col}' ...")
+    logger.info("Computing '%s' weights for reward_col='%s' ...", args.metric, args.reward_col)
     weights = compute_metric(df, args.metric, args.reward_col)
 
     suffix = f"_n{n}_m{m}" if (args.n_images is not None or args.m_reconstructions is not None) else ""
     output_path = os.path.join(args.output_dir, f"{args.metric}_{args.reward_col}{suffix}.json")
     save_weights(weights, output_path)
-    print(f"Saved to {output_path}")
+    logger.info("Saved to %s", output_path)

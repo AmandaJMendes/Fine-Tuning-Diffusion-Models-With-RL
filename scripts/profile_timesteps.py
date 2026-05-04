@@ -1,5 +1,6 @@
 import argparse
 import csv
+import logging
 import os
 
 import numpy as np
@@ -130,7 +131,13 @@ def write_score_row(
 
 
 if __name__ == "__main__":
-    print("Computing reward-aware timestep metrics...")
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger = logging.getLogger(__name__)
+    logger.info("Computing reward-aware timestep metrics...")
 
     parser = argparse.ArgumentParser(
         description=(
@@ -209,12 +216,12 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.set_device(device)
         torch.cuda.manual_seed_all(23 + local_rank)
-    print(f"[{local_rank}] Using device: {device}")
+    logger.info("[%d] Using device: %s", local_rank, device)
 
     # Set seed
     torch.manual_seed(23 + local_rank)
     np.random.seed(23 + local_rank)
-    print(f"[{local_rank}] Set random seeds to 23 + {local_rank}")
+    logger.info("[%d] Set random seeds to 23 + %d", local_rank, local_rank)
 
     # Create directories
     os.makedirs(plot_dir, exist_ok=True)
@@ -230,13 +237,13 @@ if __name__ == "__main__":
         csv.DictWriter(csvfile, fieldnames=csv_keys).writeheader()
 
     # Load model and scheduler
-    print(f"[{local_rank}] Loading model and scheduler...")
+    logger.info("[%d] Loading model and scheduler...", local_rank)
     scheduler = CustomDDIMScheduler.from_pretrained(args.model_id, use_safetensors=True)
     model = UNet2DModel.from_pretrained(args.model_id).to(device).eval()
     scheduler.set_timesteps(args.num_denoising_steps)
 
     # Generate images
-    print(f"[{local_rank}] Generating {args.num_images} images...")
+    logger.info("[%d] Generating %d images...", local_rank, args.num_images)
     _, next_latents, _, timesteps = generate_batch(
         model, scheduler, args.num_images, device
     )  # next_latents: [num_images, T, C, H, W] ; timesteps: [T]
@@ -250,7 +257,7 @@ if __name__ == "__main__":
                 os.path.join(original_images_dir, f"image_{img_idx}.png")
             )
 
-    print(f"[{local_rank}] Computing original scores for generated images...")
+    logger.info("[%d] Computing original scores for generated images...", local_rank)
     original_rewards, original_scores = reward_function(
         original_images,
         prompt=args.reward_prompt,
@@ -273,10 +280,10 @@ if __name__ == "__main__":
                 reward=original_rewards[img_idx],
                 scores=per_sample_scores,
             )
-    print(f"[{local_rank}] Original scores for all generated images saved.")
+    logger.info("[%d] Original scores for all generated images saved.", local_rank)
 
     # For each timestep, corrupt each image num_reconstructions times and reconstruct
-    print(f"[{local_rank}] Computing reconstructions across all timesteps...")
+    logger.info("[%d] Computing reconstructions across all timesteps...", local_rank)
     with open(csv_path, "a", newline="", buffering=1) as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_keys)
         for timestep in tqdm(timesteps, desc=f"Timesteps [{local_rank}]"):
@@ -325,4 +332,4 @@ if __name__ == "__main__":
 
             torch.cuda.empty_cache()
 
-    print(f"[{local_rank}] Timestep profiling completed.")
+    logger.info("[%d] Timestep profiling completed.", local_rank)
