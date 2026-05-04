@@ -4,6 +4,7 @@ from torch import nn
 from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
 
 
+@torch.no_grad()
 def generate_batch(
     model: nn.Module,
     scheduler: CustomDDIMScheduler,
@@ -40,12 +41,11 @@ def generate_batch(
     for t in scheduler.timesteps:
         latents_list.append(latents.cpu())
 
-        with torch.no_grad():
-            pred_noise = model(latents, t).sample
-            scheduler_output, log_prob = scheduler.step(
-                pred_noise, t, latents, eta=1.0, generator=generator
-            )
-            latents = scheduler_output.prev_sample
+        pred_noise = model(latents, t).sample
+        scheduler_output, log_prob = scheduler.step(
+            pred_noise, t, latents, eta=1.0, generator=generator
+        )
+        latents = scheduler_output.prev_sample
 
         log_probs_list.append(log_prob.cpu())
         next_latents_list.append(latents.cpu())
