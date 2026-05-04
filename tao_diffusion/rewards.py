@@ -1,5 +1,4 @@
 import ImageReward as RM
-import PIL
 import PIL.Image
 import torch
 from aesthetics_predictor import AestheticsPredictorV1
