@@ -210,6 +210,10 @@ if __name__ == "__main__":
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if args.num_images < world_size:
+        raise ValueError(
+            f"--num_images ({args.num_images}) must be >= number of GPUs ({world_size})"
+        )
     base, remainder = divmod(args.num_images, world_size)
     num_images_local = base + (1 if local_rank < remainder else 0)
     plot_dir = os.path.join(args.output_dir, f"worker_{local_rank}")
