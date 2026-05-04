@@ -1,8 +1,8 @@
 # Policy Gradient Fine-Tuning of Diffusion Models with Timestep-Aware Optimization
 
-Code for the ECCV 2026 paper of the same name. The project is also referred to as **TAO-Diffusion** (Timestep-Aware Optimization).
+Code for the paper of the same name. The project is also referred to as **TAO-Diffusion** (Timestep-Aware Optimization).
 
-> **[Paper — link coming soon](#citation)**
+> **Paper — link coming soon**
 
 Standard policy-gradient fine-tuning of diffusion models applies the same terminal reward uniformly across all T denoising timesteps. This is neither computationally nor convergence-efficient. We propose a **weighted policy-gradient estimator** that samples only a subset of timesteps per update, guided by two reward-dependent importance measures:
 
@@ -128,13 +128,4 @@ Set `wandb_project` in your config or pass `--wandb_project <name>` on the comma
 
 ## Citation
 
-```bibtex
-@inproceedings{mendes2026tao,
-  title     = {Policy Gradient Fine-Tuning of Diffusion Models with Timestep-Aware Optimization},
-  author    = {Mendes, Amanda et al.},
-  booktitle = {European Conference on Computer Vision (ECCV)},
-  year      = {2026},
-}
-```
-
-*(Paper link will be added upon publication.)*
+*(Paper and citation will be added upon publication.)*
