@@ -25,7 +25,7 @@ def aesthetics_reward(pil_images: list[PIL.Image.Image]) -> list[float]:
     outputs = aesthetics_reward.aesthetics_predictor(**inputs)
     prediction = outputs.logits
 
-    return prediction.squeeze().tolist()
+    return prediction.squeeze(-1).tolist()
 
 
 @torch.no_grad()
