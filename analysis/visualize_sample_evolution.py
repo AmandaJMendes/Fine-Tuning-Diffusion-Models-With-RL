@@ -9,8 +9,7 @@ import tqdm
 import wandb
 from PIL import Image
 
-DEFAULT_ENTITY = "amanda-mendes-cloudwalk"
-DEFAULT_PROJECT = "diffusion-finetune"
+DEFAULT_PROJECT = "tao-diffusion"
 ARTIFACTS_DIR = "artifacts/gifs"
 
 
@@ -21,9 +20,6 @@ def _resolve_run_path(entity, project, run_name):
             return f"{entity}/{project}/{run.id}"
     raise ValueError(f"Run '{run_name}' not found in {entity}/{project}")
 
-
-def _is_frame_file(filename):
-    return filename.endswith(".png") and "sample_" in filename and "_step_" in filename
 
 
 def create_grid(pil_imgs, cols=None):
@@ -121,7 +117,7 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="Visualize how generated samples evolve during fine-tuning.")
     ap.add_argument("--run_name", required=True, help="W&B run display name (e.g. morning-wave-19)")
-    ap.add_argument("--entity", default=DEFAULT_ENTITY)
+    ap.add_argument("--entity", required=True, help="W&B entity (username or team name)")
     ap.add_argument("--project", default=DEFAULT_PROJECT)
     ap.add_argument("--frames_dir", default=None, help="Frame cache directory (default: artifacts/frames/<run_name>)")
     ap.add_argument("--fps", type=int, default=1)
