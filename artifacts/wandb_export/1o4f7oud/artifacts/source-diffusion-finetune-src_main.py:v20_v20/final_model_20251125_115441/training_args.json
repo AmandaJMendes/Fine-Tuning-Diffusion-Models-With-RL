@@ -1,0 +1,12 @@
+{
+  "per_gpu_batch_size": 5,
+  "inference_timesteps": 50,
+  "full_epochs": 100,
+  "epochs_per_sampling": 2,
+  "samples_per_epoch": 100,
+  "timesteps_weights_json": null,
+  "num_train_timesteps": null,
+  "learning_rate": 1e-06,
+  "eval_every_steps": 10,
+  "eval_samples": 20
+}
