@@ -1,6 +1,0 @@
-torch
-diffusers
-matplotlib
-pandas
-transformers
-scipy

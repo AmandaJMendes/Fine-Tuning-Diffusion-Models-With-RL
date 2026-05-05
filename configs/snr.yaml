@@ -1,0 +1,32 @@
+# SNR-based timestep sampling (reward-agnostic structural prior).
+# Weights timesteps by 1 / (1 + SNR(t)) — favours high-noise steps.
+
+# Model
+model_id: google/ddpm-celebahq-256
+
+# Trajectory collection
+num_denoising_steps: 50
+num_samples: 100
+local_batch_size: 5
+
+# Timestep sampling strategy
+timesteps_per_update: 20
+timestep_weights: artifacts/weights/snr_reward.json
+
+# Training
+num_epochs: 100
+inner_epochs: 2
+learning_rate: 1.0e-6
+clip_epsilon: 1.0e-4
+
+# Reward
+reward_prompt: "a natural, high-quality portrait photograph of a person with realistic facial features, normal hair color, natural expression, and clean background"
+gender_threshold: 0.8
+gender_weight: 2.0
+
+# Evaluation
+eval_every_steps: 20
+eval_samples: 20
+
+# Logging
+wandb_project: tao-diffusion
