@@ -107,12 +107,13 @@ def reward_function(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     images = tensor_batch_to_pil_images(latents_batch)
     metrics = compute_reward_metrics(images, prompt=prompt)
-    total_score, sex_score_binary = compute_total_reward(
+    _, sex_score_binary = compute_total_reward(
         metrics["ir_person"],
         metrics["sex_score"],
         male_threshold=male_threshold,
         gender_weight=gender_weight,
     )
+    total_score = metrics["aesthetics_score"]
 
     # Return all metrics for logging
     return total_score, {
