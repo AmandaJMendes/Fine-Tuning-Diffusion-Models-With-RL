@@ -227,7 +227,6 @@ if __name__ == "__main__":
             yaml_defaults = yaml.safe_load(f) or {}
 
     parser = argparse.ArgumentParser(description="Fine-tune diffusion model with RL")
-    parser.set_defaults(**yaml_defaults)
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
 
     # Model
@@ -331,6 +330,7 @@ if __name__ == "__main__":
         help="Log per-timestep gradient mean/std/norm to W&B (adds hook overhead per backward)",
     )
 
+    parser.set_defaults(**yaml_defaults)
     args = parser.parse_args()
 
     if args.timesteps_per_update is not None and args.timesteps_per_update < 1:
