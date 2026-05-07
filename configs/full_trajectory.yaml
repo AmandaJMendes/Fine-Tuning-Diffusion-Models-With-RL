@@ -25,7 +25,7 @@ gender_threshold: 0.8                    # male-probability threshold for binary
 gender_weight: 2.0                       # weight on the gender term in the combined reward
 
 # Evaluation
-eval_every_steps: 20
+eval_every_steps: 10
 eval_samples: 20
 
 # Logging

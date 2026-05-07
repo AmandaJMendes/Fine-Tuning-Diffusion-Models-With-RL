@@ -330,10 +330,7 @@ if __name__ == "__main__":
         help="Log per-timestep gradient mean/std/norm to W&B (adds hook overhead per backward)",
     )
 
-    # Apply YAML values after add_argument so they overwrite the action defaults.
-    # CLI flags still take precedence — set_defaults only fills in unspecified args.
     parser.set_defaults(**yaml_defaults)
-
     args = parser.parse_args()
 
     if args.timesteps_per_update is not None and args.timesteps_per_update < 1:
