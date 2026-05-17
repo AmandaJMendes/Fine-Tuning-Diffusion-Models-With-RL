@@ -52,22 +52,16 @@ def export_run(run, output_dir: Path) -> None:
     (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str))
     print(f"  [metadata] saved")
 
-    # Download the raw wandb-history.jsonl — contains every wandb.log() call verbatim,
-    # including timesteps/t=* and grad stats that scan_history() misses when keys are split
-    # across multiple log() calls at the same step.
-    try:
-        run.file("wandb-history.jsonl").download(root=str(run_dir), replace=True)
-        raw_path = run_dir / "wandb-history.jsonl"
-        raw_rows = [json.loads(l) for l in raw_path.read_text().splitlines() if l.strip()]
-        print(f"  [history] {len(raw_rows)} raw rows saved (wandb-history.jsonl)")
-        history = raw_rows
-    except Exception as e:
-        print(f"  Warning: could not download raw history file ({e}), falling back to scan_history()")
-        history = list(run.scan_history())
-        (run_dir / "history.jsonl").write_text(
-            "\n".join(json.dumps(row, default=str) for row in history)
-        )
-        print(f"  [history] {len(history)} rows saved (scan_history fallback)")
+    # Use scan_history() as the source of truth — it queries the wandb backend's merged
+    # per-step history, which is authoritative. The raw wandb-history.jsonl uploaded by
+    # the client can be missing the final row when the run shuts down before the last
+    # log() call flushes (observed: step=1000 eval missing for some runs even though it
+    # ran and updated the summary).
+    history = list(run.scan_history(page_size=10000))
+    (run_dir / "history.jsonl").write_text(
+        "\n".join(json.dumps(row, default=str) for row in history)
+    )
+    print(f"  [history] {len(history)} rows saved")
 
     # Download every media file referenced in history (eval images, etc.)
     media_files_downloaded = 0
