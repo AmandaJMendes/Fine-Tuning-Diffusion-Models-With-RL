@@ -112,6 +112,54 @@ def check_model_sync(model: UNet2DModel, accelerator: Accelerator, tol: float = 
             _logger.warning(f"Parameter mismatch across ranks detected (max |Δ| = {max_diff:.3e})")
 
 
+@torch.no_grad()
+def generate_eval_samples(
+    model: UNet2DModel,
+    scheduler: CustomDDIMScheduler,
+    batch_size: int,
+    device: torch.device,
+    base_seed: int,
+    start_global_idx: int,
+) -> torch.Tensor:
+    """
+    Generate a batch of final denoised samples x_0 with **portable** RNG.
+
+    Each image with global index g = start_global_idx + j (j = 0..batch_size-1)
+    is driven by its own CPU generator seeded (base_seed + g). Because the RNG
+    runs on CPU rather than on the CUDA device:
+
+      * the initial noise x_T and every per-step stochastic DDIM variance noise
+        depend only on g, not on the GPU architecture (the CUDA RNG is
+        architecture-dependent; the CPU Philox RNG is not);
+      * the image set is independent of world size — the global index, not the
+        rank, identifies the image;
+      * the global / training RNG is never touched.
+
+    Returns the final x_0 tensor of shape (batch_size, C, H, W).
+    """
+    n_channels = model.config.in_channels
+    image_size = model.config.sample_size
+    shape = (n_channels, image_size, image_size)
+
+    gens = [
+        torch.Generator(device="cpu").manual_seed(base_seed + start_global_idx + j)
+        for j in range(batch_size)
+    ]
+
+    # x_T drawn on CPU, then moved to device — keeps the noise stream GPU-independent
+    latents = torch.stack([torch.randn(shape, generator=g) for g in gens]).to(device)
+
+    for t in scheduler.timesteps:
+        # Per-step stochastic DDIM variance noise, also CPU-seeded, fed in
+        # explicitly so the scheduler never touches the CUDA RNG.
+        var_noise = torch.stack([torch.randn(shape, generator=g) for g in gens]).to(device)
+        pred_noise = model(latents, t).sample
+        out, _ = scheduler.step(pred_noise, t, latents, eta=1.0, variance_noise=var_noise)
+        latents = out.prev_sample
+
+    return latents
+
+
 def evaluate_model(
     step: int,
     model: UNet2DModel,
@@ -126,8 +174,23 @@ def evaluate_model(
     gender_weight: float = 2.0,
 ) -> None:
     """
-    Deterministic evaluation that does not touch the global RNG
-    (→ training randomness proceeds as usual).
+    Deterministic, **portable** evaluation.
+
+    Every eval image is identified by a global index g in [0, num_samples). Its
+    noise stream (x_T + all per-step DDIM variance noise) comes from a CPU
+    generator seeded (fixed_seed + g), so the set of eval images is:
+
+      * independent of the number of GPUs — only rank 0 generates, using global
+        indices 0..num_samples-1, so adding or removing GPUs does not change
+        which image a given index maps to;
+      * independent of GPU architecture — the RNG runs on CPU;
+      * independent of the training RNG — private generators are used.
+
+    Note: the UNet forward pass itself is not bit-exact across GPU families
+    (different cuDNN kernels do slightly different floating-point reductions),
+    so two runs on different architectures will produce near-identical, not
+    pixel-identical, images from the same seed. The dominant randomness (the
+    injected noise) is identical, which is what makes the images comparable.
     """
     os.makedirs(save_dir, exist_ok=True)
 
@@ -135,58 +198,71 @@ def evaluate_model(
     model.eval()
 
     with torch.no_grad():
-        num_batches = math.ceil(num_samples / (batch_size * accelerator.num_processes))
-        all_rewards = []
-        all_metrics = {
+        n_channels = model.config.in_channels
+        image_size = model.config.sample_size
+
+        # Only rank 0 generates real images; other ranks contribute zero
+        # placeholders so accelerator.gather (which requires equal-sized
+        # tensors from every rank) still works. After gather + truncate to
+        # num_samples the result is exactly rank 0's images in global-index
+        # order, regardless of world size.
+        num_batches = math.ceil(num_samples / batch_size)
+        local_images = []
+        local_rewards = []
+        local_metrics = {
             k: [] for k in ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
         }
-        wandb_imgs = []
-        img_idx = 0
 
-        for i in range(num_batches):
-            # Isolated RNG so eval doesn't perturb the training random state
-            gen = torch.Generator(device=accelerator.device).manual_seed(
-                fixed_seed + i + accelerator.process_index
-            )
-
-            latents, next_latents, _, _ = generate_batch(
-                model, scheduler, batch_size, device=accelerator.device, generator=gen
-            )
-
-            rewards, scores = reward_function(
-                next_latents[:, -1],
-                prompt=reward_prompt,
-                male_threshold=gender_threshold,
-                gender_weight=gender_weight,
-            )
-            rewards = rewards.to(accelerator.device)
-
-            all_rewards.append(accelerator.gather(rewards))
-            for k in all_metrics:
-                all_metrics[k].append(
-                    accelerator.gather(scores[k].to(accelerator.device)).cpu().flatten()
-                )
-
-            gathered = accelerator.gather(next_latents[:, -1].to(accelerator.device))
-
+        for b in range(num_batches):
+            start_g = b * batch_size
             if accelerator.is_main_process:
-                for img in tensor_batch_to_pil_images(gathered):
-                    img.save(os.path.join(save_dir, f"step_{step:08d}_{img_idx:05d}.png"))
-                    wandb_imgs.append(wandb.Image(img))
-                    img_idx += 1
+                samples = generate_eval_samples(
+                    model,
+                    scheduler,
+                    batch_size,
+                    accelerator.device,
+                    base_seed=fixed_seed,
+                    start_global_idx=start_g,
+                )
+                rewards, scores = reward_function(
+                    samples,
+                    prompt=reward_prompt,
+                    male_threshold=gender_threshold,
+                    gender_weight=gender_weight,
+                )
+                rewards = rewards.to(accelerator.device)
+                for k in local_metrics:
+                    local_metrics[k].append(scores[k].to(accelerator.device))
+            else:
+                samples = torch.zeros(
+                    batch_size, n_channels, image_size, image_size, device=accelerator.device
+                )
+                rewards = torch.zeros(batch_size, device=accelerator.device)
+                for k in local_metrics:
+                    local_metrics[k].append(torch.zeros(batch_size, device=accelerator.device))
+            local_images.append(samples)
+            local_rewards.append(rewards)
 
-        all_rewards = torch.cat(all_rewards)[:num_samples]
+        local_images = torch.cat(local_images)
+        local_rewards = torch.cat(local_rewards)
+        all_images = accelerator.gather(local_images)[:num_samples]
+        all_rewards = accelerator.gather(local_rewards)[:num_samples]
+
         metrics = {
             "eval/reward": all_rewards.mean().item(),
             "eval/reward_std": all_rewards.std(unbiased=False).item(),
         }
-        for k, v in all_metrics.items():
-            vals = torch.cat(v).float()[:num_samples]
+        for k in local_metrics:
+            vals = accelerator.gather(torch.cat(local_metrics[k]))[:num_samples].float()
             metrics[f"eval/{k}"] = vals.mean().item()
             metrics[f"eval/{k}_std"] = vals.std().item()
 
         if accelerator.is_main_process:
-            accelerator.log({"eval/samples": wandb_imgs[:num_samples], **metrics}, step=step)
+            wandb_imgs = []
+            for img_idx, img in enumerate(tensor_batch_to_pil_images(all_images)):
+                img.save(os.path.join(save_dir, f"step_{step:08d}_{img_idx:05d}.png"))
+                wandb_imgs.append(wandb.Image(img))
+            accelerator.log({"eval/samples": wandb_imgs, **metrics}, step=step)
 
     if was_training:
         model.train()
