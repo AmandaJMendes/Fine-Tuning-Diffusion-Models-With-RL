@@ -116,45 +116,50 @@ def check_model_sync(model: UNet2DModel, accelerator: Accelerator, tol: float = 
 def generate_eval_samples(
     model: UNet2DModel,
     scheduler: CustomDDIMScheduler,
-    batch_size: int,
+    global_indices: list[int],
     device: torch.device,
     base_seed: int,
-    start_global_idx: int,
 ) -> torch.Tensor:
     """
-    Generate a batch of final denoised samples x_0 with **portable** RNG.
+    Generate denoised samples x_0 with **portable** RNG.
 
-    Each image with global index g = start_global_idx + j (j = 0..batch_size-1)
-    is driven by its own CPU generator seeded (base_seed + g). Because the RNG
-    runs on CPU rather than on the CUDA device:
+    Each image with global index g in *global_indices* is driven by its own
+    CPU generator seeded (base_seed + g).  Because the RNG runs on CPU
+    rather than on the CUDA device:
 
-      * the initial noise x_T and every per-step stochastic DDIM variance noise
-        depend only on g, not on the GPU architecture (the CUDA RNG is
-        architecture-dependent; the CPU Philox RNG is not);
-      * the image set is independent of world size — the global index, not the
-        rank, identifies the image;
+      * the initial noise x_T and every per-step stochastic DDIM variance
+        noise depend only on g, not on the GPU architecture (the CUDA RNG
+        is architecture-dependent; the CPU Philox RNG is not);
+      * the image set is independent of world size — the global index, not
+        the rank, identifies the image;
       * the global / training RNG is never touched.
 
-    Returns the final x_0 tensor of shape (batch_size, C, H, W).
+    Returns the final x_0 tensor of shape (len(global_indices), C, H, W).
     """
     n_channels = model.config.in_channels
     image_size = model.config.sample_size
     shape = (n_channels, image_size, image_size)
 
     gens = [
-        torch.Generator(device="cpu").manual_seed(base_seed + start_global_idx + j)
-        for j in range(batch_size)
+        torch.Generator(device="cpu").manual_seed(base_seed + g)
+        for g in global_indices
     ]
 
-    # x_T drawn on CPU, then moved to device — keeps the noise stream GPU-independent
-    latents = torch.stack([torch.randn(shape, generator=g) for g in gens]).to(device)
+    # x_T drawn on CPU, then moved to device — keeps noise GPU-independent
+    latents = torch.stack(
+        [torch.randn(shape, generator=g) for g in gens]
+    ).to(device)
 
     for t in scheduler.timesteps:
-        # Per-step stochastic DDIM variance noise, also CPU-seeded, fed in
-        # explicitly so the scheduler never touches the CUDA RNG.
-        var_noise = torch.stack([torch.randn(shape, generator=g) for g in gens]).to(device)
+        # Per-step stochastic DDIM variance noise, also CPU-seeded, fed
+        # in explicitly so the scheduler never touches the CUDA RNG.
+        var_noise = torch.stack(
+            [torch.randn(shape, generator=g) for g in gens]
+        ).to(device)
         pred_noise = model(latents, t).sample
-        out, _ = scheduler.step(pred_noise, t, latents, eta=1.0, variance_noise=var_noise)
+        out, _ = scheduler.step(
+            pred_noise, t, latents, eta=1.0, variance_noise=var_noise
+        )
         latents = out.prev_sample
 
     return latents
@@ -174,23 +179,26 @@ def evaluate_model(
     gender_weight: float = 2.0,
 ) -> None:
     """
-    Deterministic, **portable** evaluation.
+    Deterministic, **portable**, parallelized evaluation.
 
-    Every eval image is identified by a global index g in [0, num_samples). Its
-    noise stream (x_T + all per-step DDIM variance noise) comes from a CPU
-    generator seeded (fixed_seed + g), so the set of eval images is:
+    Every eval image is identified by a global index g ∈ [0, num_samples).
+    Its noise stream (x_T + all per-step DDIM variance noise) comes from a
+    CPU generator seeded (fixed_seed + g), so the set of eval images is:
 
-      * independent of the number of GPUs — only rank 0 generates, using global
-        indices 0..num_samples-1, so adding or removing GPUs does not change
-        which image a given index maps to;
+      * independent of the number of GPUs — image identity is determined
+        by g, not by which rank generates it.  Work is distributed across
+        ranks via stride sharding (rank r generates indices
+        {r, r+P, r+2P, …}) and the results are gathered and reordered
+        into global-index order;
       * independent of GPU architecture — the RNG runs on CPU;
       * independent of the training RNG — private generators are used.
 
-    Note: the UNet forward pass itself is not bit-exact across GPU families
-    (different cuDNN kernels do slightly different floating-point reductions),
-    so two runs on different architectures will produce near-identical, not
-    pixel-identical, images from the same seed. The dominant randomness (the
-    injected noise) is identical, which is what makes the images comparable.
+    Note: the UNet forward pass itself is not bit-exact across GPU
+    families (different cuDNN kernels do slightly different floating-point
+    reductions), so two runs on different architectures will produce
+    near-identical, not pixel-identical, images from the same seed.  The
+    dominant randomness (the injected noise) is identical, which is what
+    makes the images comparable.
     """
     os.makedirs(save_dir, exist_ok=True)
 
@@ -200,69 +208,131 @@ def evaluate_model(
     with torch.no_grad():
         n_channels = model.config.in_channels
         image_size = model.config.sample_size
+        num_processes = accelerator.num_processes
+        rank = accelerator.process_index
+        device = accelerator.device
 
-        # Only rank 0 generates real images; other ranks contribute zero
-        # placeholders so accelerator.gather (which requires equal-sized
-        # tensors from every rank) still works. After gather + truncate to
-        # num_samples the result is exactly rank 0's images in global-index
-        # order, regardless of world size.
-        num_batches = math.ceil(num_samples / batch_size)
-        local_images = []
-        local_rewards = []
-        local_metrics = {
-            k: [] for k in ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
+        # ------------------------------------------------------------------
+        # Stride sharding: rank r owns global indices {r, r+P, r+2P, …}.
+        # This partitions [0, num_samples) exactly once across ranks with
+        # counts differing by at most 1.  Each image g is seeded by
+        # (fixed_seed + g) on CPU, so the mapping g → image is the same
+        # regardless of which rank produces it or how many ranks exist.
+        # ------------------------------------------------------------------
+        owned_indices = list(range(rank, num_samples, num_processes))
+        max_per_rank = math.ceil(num_samples / num_processes)
+
+        metric_keys = [
+            "ir_person",
+            "sex_score",
+            "sex_score_binary",
+            "aesthetics_score",
+        ]
+
+        # --- Generate this rank's owned images in batches ----------------
+        image_parts: list[torch.Tensor] = []
+        reward_parts: list[torch.Tensor] = []
+        metric_parts: dict[str, list[torch.Tensor]] = {
+            k: [] for k in metric_keys
         }
 
-        for b in range(num_batches):
-            start_g = b * batch_size
-            if accelerator.is_main_process:
-                samples = generate_eval_samples(
-                    model,
-                    scheduler,
-                    batch_size,
-                    accelerator.device,
-                    base_seed=fixed_seed,
-                    start_global_idx=start_g,
-                )
-                rewards, scores = reward_function(
-                    samples,
-                    prompt=reward_prompt,
-                    male_threshold=gender_threshold,
-                    gender_weight=gender_weight,
-                )
-                rewards = rewards.to(accelerator.device)
-                for k in local_metrics:
-                    local_metrics[k].append(scores[k].to(accelerator.device))
-            else:
-                samples = torch.zeros(
-                    batch_size, n_channels, image_size, image_size, device=accelerator.device
-                )
-                rewards = torch.zeros(batch_size, device=accelerator.device)
-                for k in local_metrics:
-                    local_metrics[k].append(torch.zeros(batch_size, device=accelerator.device))
-            local_images.append(samples)
-            local_rewards.append(rewards)
+        for b_start in range(0, len(owned_indices), batch_size):
+            batch_indices = owned_indices[b_start : b_start + batch_size]
+            samples = generate_eval_samples(
+                model, scheduler, batch_indices, device, base_seed=fixed_seed
+            )
+            rewards, scores = reward_function(
+                samples,
+                prompt=reward_prompt,
+                male_threshold=gender_threshold,
+                gender_weight=gender_weight,
+            )
+            image_parts.append(samples)
+            reward_parts.append(rewards.to(device))
+            for k in metric_keys:
+                metric_parts[k].append(scores[k].to(device))
 
-        local_images = torch.cat(local_images)
-        local_rewards = torch.cat(local_rewards)
-        all_images = accelerator.gather(local_images)[:num_samples]
-        all_rewards = accelerator.gather(local_rewards)[:num_samples]
+        # --- Concatenate (handle ranks that own zero images) -------------
+        if image_parts:
+            local_images = torch.cat(image_parts)
+            local_rewards = torch.cat(reward_parts)
+            local_metrics = {
+                k: torch.cat(metric_parts[k]) for k in metric_keys
+            }
+        else:
+            local_images = torch.empty(
+                0, n_channels, image_size, image_size, device=device
+            )
+            local_rewards = torch.empty(0, device=device)
+            local_metrics = {
+                k: torch.empty(0, device=device) for k in metric_keys
+            }
+
+        # --- Pad to max_per_rank so every rank has equal-sized tensors ---
+        pad = max_per_rank - local_images.size(0)
+        if pad > 0:
+            local_images = torch.cat([
+                local_images,
+                torch.zeros(
+                    pad, n_channels, image_size, image_size, device=device
+                ),
+            ])
+            local_rewards = torch.cat([
+                local_rewards,
+                torch.zeros(pad, device=device),
+            ])
+            for k in metric_keys:
+                local_metrics[k] = torch.cat([
+                    local_metrics[k],
+                    torch.zeros(pad, device=device),
+                ])
+
+        # --- Gather across ranks and reorder to global-index order -------
+        # After gather the tensor is laid out as
+        #   [rank0_block | rank1_block | … | rankP-1_block]
+        # where rank r's block has max_per_rank entries corresponding to
+        # global indices [r, r+P, r+2P, …] (plus any padding at the end).
+        #
+        # Global index g was produced by rank (g % P) at local position
+        # (g // P), so its gathered position is:
+        #   (g % P) * max_per_rank + (g // P)
+        gathered_images = accelerator.gather(local_images)
+        gathered_rewards = accelerator.gather(local_rewards)
+        gathered_metrics = {
+            k: accelerator.gather(local_metrics[k]) for k in metric_keys
+        }
+
+        reorder = [
+            (g % num_processes) * max_per_rank + (g // num_processes)
+            for g in range(num_samples)
+        ]
+        all_images = gathered_images[reorder]
+        all_rewards = gathered_rewards[reorder]
 
         metrics = {
             "eval/reward": all_rewards.mean().item(),
             "eval/reward_std": all_rewards.std(unbiased=False).item(),
         }
-        for k in local_metrics:
-            vals = accelerator.gather(torch.cat(local_metrics[k]))[:num_samples].float()
+        for k in metric_keys:
+            vals = gathered_metrics[k][reorder].float()
             metrics[f"eval/{k}"] = vals.mean().item()
             metrics[f"eval/{k}_std"] = vals.std().item()
 
         if accelerator.is_main_process:
             wandb_imgs = []
-            for img_idx, img in enumerate(tensor_batch_to_pil_images(all_images)):
-                img.save(os.path.join(save_dir, f"step_{step:08d}_{img_idx:05d}.png"))
+            for img_idx, img in enumerate(
+                tensor_batch_to_pil_images(all_images)
+            ):
+                img.save(
+                    os.path.join(
+                        save_dir,
+                        f"step_{step:08d}_{img_idx:05d}.png",
+                    )
+                )
                 wandb_imgs.append(wandb.Image(img))
-            accelerator.log({"eval/samples": wandb_imgs, **metrics}, step=step)
+            accelerator.log(
+                {"eval/samples": wandb_imgs, **metrics}, step=step
+            )
 
     if was_training:
         model.train()
