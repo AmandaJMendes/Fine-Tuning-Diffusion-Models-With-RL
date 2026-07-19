@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import time
 from collections.abc import Generator
 
@@ -110,6 +111,62 @@ def check_model_sync(model: UNet2DModel, accelerator: Accelerator, tol: float = 
             _logger.info(f"Model parameters in sync across all ranks (max |Δ| = {max_diff:.3e})")
         else:
             _logger.warning(f"Parameter mismatch across ranks detected (max |Δ| = {max_diff:.3e})")
+
+
+def save_checkpoint(
+    accelerator: Accelerator,
+    checkpoint_dir: str,
+    global_step: int,
+    epoch: int,
+) -> None:
+    """
+    Save a resumable checkpoint (model + optimizer + RNG + scheduler state) using
+    accelerator.save_state, plus a small metadata file with global_step and epoch.
+
+    Writes to a temp directory then atomically swaps it into place, so a crash
+    mid-save never corrupts the previous checkpoint.  Only one checkpoint is
+    ever kept (checkpoint_dir is overwritten).  Must be called by all ranks.
+    """
+    tmp_dir = checkpoint_dir + ".tmp"
+    if accelerator.is_main_process:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    accelerator.wait_for_everyone()
+
+    accelerator.save_state(tmp_dir)
+
+    if accelerator.is_main_process:
+        meta = {"global_step": int(global_step), "epoch": int(epoch)}
+        with open(os.path.join(tmp_dir, "training_meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+        # Atomic swap: remove old, rename new into place.
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+        os.rename(tmp_dir, checkpoint_dir)
+        logging.getLogger(__name__).info(
+            f"Checkpoint saved (epoch={epoch}, global_step={global_step}) → {checkpoint_dir}"
+        )
+    accelerator.wait_for_everyone()
+
+
+def load_checkpoint(
+    accelerator: Accelerator,
+    checkpoint_dir: str,
+) -> tuple[int, int]:
+    """
+    Restore model, optimizer, RNG, and scheduler state from checkpoint_dir.
+    Returns (global_step, epoch) saved in the checkpoint's metadata.
+    Must be called by all ranks, after accelerator.prepare().
+    """
+    if not os.path.isdir(checkpoint_dir):
+        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
+    accelerator.load_state(checkpoint_dir)
+    with open(os.path.join(checkpoint_dir, "training_meta.json")) as f:
+        meta = json.load(f)
+    global_step = int(meta["global_step"])
+    epoch = int(meta["epoch"])
+    logging.getLogger(__name__).info(
+        f"Resumed from {checkpoint_dir} (epoch={epoch}, global_step={global_step})"
+    )
+    return global_step, epoch
 
 
 def evaluate_model(
@@ -420,6 +477,28 @@ if __name__ == "__main__":
         help="Log per-timestep gradient mean/std/norm to W&B (adds hook overhead per backward)",
     )
 
+    # Checkpointing
+    parser.add_argument(
+        "--checkpoint_every_epochs",
+        type=int,
+        default=10,
+        help="Save a resumable checkpoint every N epochs (model + optimizer + RNG + "
+        "global_step). Only the latest is kept.",
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="artifacts/checkpoints/latest",
+        help="Directory for the single kept checkpoint (overwritten each save).",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to a checkpoint directory to resume from (restores model, optimizer, "
+        "RNG, global_step, and epoch). Skips the pre-training eval.",
+    )
+
     parser.set_defaults(**yaml_defaults)
     args = parser.parse_args()
 
@@ -496,23 +575,29 @@ if __name__ == "__main__":
         wandb.log_artifact(art)
 
     global_step = 0
+    start_epoch = 0
+    if args.resume_from_checkpoint:
+        global_step, start_epoch = load_checkpoint(accelerator, args.resume_from_checkpoint)
 
-    logger.info("Evaluating model before fine-tuning")
-    evaluate_model(
-        step=global_step,
-        model=accelerator.unwrap_model(pretrained_model),
-        scheduler=scheduler,
-        num_samples=args.eval_samples,
-        batch_size=args.local_batch_size,
-        accelerator=accelerator,
-        reward_prompt=args.reward_prompt,
-        gender_threshold=args.gender_threshold,
-        gender_weight=args.gender_weight,
-        reward_device=args.reward_device,
-    )
+    if start_epoch == 0:
+        logger.info("Evaluating model before fine-tuning")
+        evaluate_model(
+            step=global_step,
+            model=accelerator.unwrap_model(pretrained_model),
+            scheduler=scheduler,
+            num_samples=args.eval_samples,
+            batch_size=args.local_batch_size,
+            accelerator=accelerator,
+            reward_prompt=args.reward_prompt,
+            gender_threshold=args.gender_threshold,
+            gender_weight=args.gender_weight,
+            reward_device=args.reward_device,
+        )
 
     for _epoch in tqdm(
-        range(args.num_epochs), desc="Training Epochs", disable=not accelerator.is_main_process
+        range(start_epoch, args.num_epochs),
+        desc="Training Epochs",
+        disable=not accelerator.is_main_process,
     ):
         # Collect trajectories: sample x_T → x_0, record latents/log_probs/rewards
         batches = []
@@ -667,6 +752,18 @@ if __name__ == "__main__":
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 accelerator.wait_for_everyone()
+
+        # Periodic resumable checkpoint at end of epoch (keep only the latest).
+        # Runs once per outer epoch, after all inner epochs complete.
+        if (
+            args.checkpoint_every_epochs > 0 and (_epoch + 1) % args.checkpoint_every_epochs == 0
+        ) or (_epoch + 1) == args.num_epochs:
+            save_checkpoint(
+                accelerator,
+                args.checkpoint_dir,
+                global_step=global_step,
+                epoch=_epoch + 1,
+            )
 
     check_model_sync(pretrained_model, accelerator)
 
