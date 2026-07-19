@@ -22,7 +22,7 @@ from tao_diffusion.rewards import (
     reward_function,
     tensor_batch_to_pil_images,
 )
-from tao_diffusion.sampling import generate_batch
+from tao_diffusion.sampling import generate_batch, generate_eval_samples
 
 
 @contextlib.contextmanager
@@ -110,59 +110,6 @@ def check_model_sync(model: UNet2DModel, accelerator: Accelerator, tol: float = 
             _logger.info(f"Model parameters in sync across all ranks (max |Δ| = {max_diff:.3e})")
         else:
             _logger.warning(f"Parameter mismatch across ranks detected (max |Δ| = {max_diff:.3e})")
-
-
-@torch.no_grad()
-def generate_eval_samples(
-    model: UNet2DModel,
-    scheduler: CustomDDIMScheduler,
-    global_indices: list[int],
-    device: torch.device,
-    base_seed: int,
-) -> torch.Tensor:
-    """
-    Generate denoised samples x_0 with **portable** RNG.
-
-    Each image with global index g in *global_indices* is driven by its own
-    CPU generator seeded (base_seed + g).  Because the RNG runs on CPU
-    rather than on the CUDA device:
-
-      * the initial noise x_T and every per-step stochastic DDIM variance
-        noise depend only on g, not on the GPU architecture (the CUDA RNG
-        is architecture-dependent; the CPU Philox RNG is not);
-      * the image set is independent of world size — the global index, not
-        the rank, identifies the image;
-      * the global / training RNG is never touched.
-
-    Returns the final x_0 tensor of shape (len(global_indices), C, H, W).
-    """
-    n_channels = model.config.in_channels
-    image_size = model.config.sample_size
-    shape = (n_channels, image_size, image_size)
-
-    gens = [
-        torch.Generator(device="cpu").manual_seed(base_seed + g)
-        for g in global_indices
-    ]
-
-    # x_T drawn on CPU, then moved to device — keeps noise GPU-independent
-    latents = torch.stack(
-        [torch.randn(shape, generator=g) for g in gens]
-    ).to(device)
-
-    for t in scheduler.timesteps:
-        # Per-step stochastic DDIM variance noise, also CPU-seeded, fed
-        # in explicitly so the scheduler never touches the CUDA RNG.
-        var_noise = torch.stack(
-            [torch.randn(shape, generator=g) for g in gens]
-        ).to(device)
-        pred_noise = model(latents, t).sample
-        out, _ = scheduler.step(
-            pred_noise, t, latents, eta=1.0, variance_noise=var_noise
-        )
-        latents = out.prev_sample
-
-    return latents
 
 
 def evaluate_model(
