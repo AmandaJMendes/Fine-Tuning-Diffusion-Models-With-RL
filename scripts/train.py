@@ -9,13 +9,13 @@ from collections.abc import Generator
 
 import torch
 import torch.distributed as dist
-import wandb
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from diffusers import UNet2DModel
 from tqdm import tqdm
 
+import wandb
 from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
 from tao_diffusion.rewards import (
     DEFAULT_REWARD_PROMPT,
@@ -124,6 +124,7 @@ def evaluate_model(
     reward_prompt: str = DEFAULT_REWARD_PROMPT,
     gender_threshold: float = 0.8,
     gender_weight: float = 2.0,
+    reward_device: str = "cuda",
 ) -> None:
     """
     Deterministic, **portable**, parallelized evaluation.
@@ -179,9 +180,7 @@ def evaluate_model(
         # --- Generate this rank's owned images in batches ----------------
         image_parts: list[torch.Tensor] = []
         reward_parts: list[torch.Tensor] = []
-        metric_parts: dict[str, list[torch.Tensor]] = {
-            k: [] for k in metric_keys
-        }
+        metric_parts: dict[str, list[torch.Tensor]] = {k: [] for k in metric_keys}
 
         for b_start in range(0, len(owned_indices), batch_size):
             batch_indices = owned_indices[b_start : b_start + batch_size]
@@ -193,6 +192,7 @@ def evaluate_model(
                 prompt=reward_prompt,
                 male_threshold=gender_threshold,
                 gender_weight=gender_weight,
+                device=reward_device,
             )
             image_parts.append(samples)
             reward_parts.append(rewards.to(device))
@@ -203,36 +203,34 @@ def evaluate_model(
         if image_parts:
             local_images = torch.cat(image_parts)
             local_rewards = torch.cat(reward_parts)
-            local_metrics = {
-                k: torch.cat(metric_parts[k]) for k in metric_keys
-            }
+            local_metrics = {k: torch.cat(metric_parts[k]) for k in metric_keys}
         else:
-            local_images = torch.empty(
-                0, n_channels, image_size, image_size, device=device
-            )
+            local_images = torch.empty(0, n_channels, image_size, image_size, device=device)
             local_rewards = torch.empty(0, device=device)
-            local_metrics = {
-                k: torch.empty(0, device=device) for k in metric_keys
-            }
+            local_metrics = {k: torch.empty(0, device=device) for k in metric_keys}
 
         # --- Pad to max_per_rank so every rank has equal-sized tensors ---
         pad = max_per_rank - local_images.size(0)
         if pad > 0:
-            local_images = torch.cat([
-                local_images,
-                torch.zeros(
-                    pad, n_channels, image_size, image_size, device=device
-                ),
-            ])
-            local_rewards = torch.cat([
-                local_rewards,
-                torch.zeros(pad, device=device),
-            ])
-            for k in metric_keys:
-                local_metrics[k] = torch.cat([
-                    local_metrics[k],
+            local_images = torch.cat(
+                [
+                    local_images,
+                    torch.zeros(pad, n_channels, image_size, image_size, device=device),
+                ]
+            )
+            local_rewards = torch.cat(
+                [
+                    local_rewards,
                     torch.zeros(pad, device=device),
-                ])
+                ]
+            )
+            for k in metric_keys:
+                local_metrics[k] = torch.cat(
+                    [
+                        local_metrics[k],
+                        torch.zeros(pad, device=device),
+                    ]
+                )
 
         # --- Gather across ranks and reorder to global-index order -------
         # After gather the tensor is laid out as
@@ -245,13 +243,10 @@ def evaluate_model(
         #   (g % P) * max_per_rank + (g // P)
         gathered_images = accelerator.gather(local_images)
         gathered_rewards = accelerator.gather(local_rewards)
-        gathered_metrics = {
-            k: accelerator.gather(local_metrics[k]) for k in metric_keys
-        }
+        gathered_metrics = {k: accelerator.gather(local_metrics[k]) for k in metric_keys}
 
         reorder = [
-            (g % num_processes) * max_per_rank + (g // num_processes)
-            for g in range(num_samples)
+            (g % num_processes) * max_per_rank + (g // num_processes) for g in range(num_samples)
         ]
         all_images = gathered_images[reorder]
         all_rewards = gathered_rewards[reorder]
@@ -267,9 +262,7 @@ def evaluate_model(
 
         if accelerator.is_main_process:
             wandb_imgs = []
-            for img_idx, img in enumerate(
-                tensor_batch_to_pil_images(all_images)
-            ):
+            for img_idx, img in enumerate(tensor_batch_to_pil_images(all_images)):
                 img.save(
                     os.path.join(
                         save_dir,
@@ -277,14 +270,10 @@ def evaluate_model(
                     )
                 )
                 wandb_imgs.append(wandb.Image(img))
-            accelerator.log(
-                {"eval/samples": wandb_imgs, **metrics}, step=step
-            )
+            accelerator.log({"eval/samples": wandb_imgs, **metrics}, step=step)
 
     if was_training:
         model.train()
-
-    torch.cuda.empty_cache()
 
 
 def parse_timesteps_weights(path: str, scheduler_timesteps: list[int]) -> dict[int, float]:
@@ -401,6 +390,14 @@ if __name__ == "__main__":
         default=2.0,
         help="Weight on the gender term in the combined reward",
     )
+    parser.add_argument(
+        "--reward_device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device for reward models (ImageReward, gender, aesthetics). "
+        "Use 'cpu' on low-memory GPUs to avoid OOM.",
+    )
 
     # Evaluation
     parser.add_argument(
@@ -451,8 +448,10 @@ if __name__ == "__main__":
     if accelerator.is_main_process:
         wandb.run.log_code(
             root=".",
-            include_fn=lambda p: p.startswith(os.path.abspath("tao_diffusion") + "/")
-            or p == os.path.abspath(__file__),
+            include_fn=lambda p: (
+                p.startswith(os.path.abspath("tao_diffusion") + "/")
+                or p == os.path.abspath(__file__)
+            ),
         )
 
     num_batches_per_gpu = math.ceil(
@@ -509,6 +508,7 @@ if __name__ == "__main__":
         reward_prompt=args.reward_prompt,
         gender_threshold=args.gender_threshold,
         gender_weight=args.gender_weight,
+        reward_device=args.reward_device,
     )
 
     for _epoch in tqdm(
@@ -538,6 +538,7 @@ if __name__ == "__main__":
                 prompt=args.reward_prompt,
                 male_threshold=args.gender_threshold,
                 gender_weight=args.gender_weight,
+                device=args.reward_device,
             )
             rewards = rewards.to(device)
 
@@ -546,7 +547,6 @@ if __name__ == "__main__":
                 all_metrics[k].append(accelerator.gather(scores[k].to(device)).cpu().flatten())
 
             batches.append((latents, next_latents, log_probs, timesteps, rewards))
-            torch.cuda.empty_cache()
 
         # Aggregate rewards across batches and log
         all_rewards = torch.cat(all_rewards)
@@ -594,7 +594,9 @@ if __name__ == "__main__":
 
             for batch in batches:
                 latents, next_latents, log_probs, timesteps, rewards = batch
-                t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}  # timestep value → trajectory index
+                t_to_idx = {
+                    int(t.item()): idx for idx, t in enumerate(timesteps)
+                }  # timestep value → trajectory index
 
                 # Advantage = normalized reward
                 advantages = (rewards - global_mean) / global_std
@@ -638,14 +640,14 @@ if __name__ == "__main__":
 
                         del lat_gpu, nxt_gpu, t_gpu, loss
                         del new_log_probs, importance_ratio, clipped_ratio
-                        torch.cuda.empty_cache()
 
                         # Optimizer steps once all timesteps for this batch have been accumulated
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
-                        torch.cuda.empty_cache()
 
-                        if accelerator.sync_gradients:  # True only after the optimizer actually stepped
+                        if (
+                            accelerator.sync_gradients
+                        ):  # True only after the optimizer actually stepped
                             global_step += 1
                             if global_step % args.eval_every_steps == 0:
                                 logger.info(f"Evaluating model at step {global_step}")
@@ -659,6 +661,7 @@ if __name__ == "__main__":
                                     reward_prompt=args.reward_prompt,
                                     gender_threshold=args.gender_threshold,
                                     gender_weight=args.gender_weight,
+                                    reward_device=args.reward_device,
                                 )
 
                 if torch.cuda.is_available():
