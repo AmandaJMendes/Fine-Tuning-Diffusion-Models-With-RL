@@ -12,16 +12,21 @@ DEFAULT_REWARD_PROMPT = (
 
 
 @torch.no_grad()
-def aesthetics_reward(pil_images: list[PIL.Image.Image]) -> list[float]:
+def aesthetics_reward(pil_images: list[PIL.Image.Image], device: str = "cpu") -> list[float]:
     if not hasattr(aesthetics_reward, "_init"):
         aesthetics_model_id = "shunk031/aesthetics-predictor-v1-vit-large-patch14"
         aesthetics_reward.aesthetics_predictor = AestheticsPredictorV1.from_pretrained(
-            aesthetics_model_id, device_map="cpu"
-        )
+            aesthetics_model_id
+        ).to(device)
         aesthetics_reward.aesthetics_processor = CLIPProcessor.from_pretrained(aesthetics_model_id)
+        aesthetics_reward._device = device
         aesthetics_reward._init = True
+    elif getattr(aesthetics_reward, "_device", "cpu") != device:
+        aesthetics_reward.aesthetics_predictor = aesthetics_reward.aesthetics_predictor.to(device)
+        aesthetics_reward._device = device
 
     inputs = aesthetics_reward.aesthetics_processor(images=pil_images, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     outputs = aesthetics_reward.aesthetics_predictor(**inputs)
     prediction = outputs.logits
 
@@ -29,22 +34,24 @@ def aesthetics_reward(pil_images: list[PIL.Image.Image]) -> list[float]:
 
 
 @torch.no_grad()
-def image_reward(pil_images: list[PIL.Image.Image], prompt: str = "") -> list[float]:
+def image_reward(
+    pil_images: list[PIL.Image.Image], prompt: str = "", device: str = "cpu"
+) -> list[float]:
     if not hasattr(image_reward, "_init"):
-        image_reward.image_reward_model = RM.load("ImageReward-v1.0", device="cpu")
+        image_reward.image_reward_model = RM.load("ImageReward-v1.0", device=device)
         image_reward._init = True
 
     return image_reward.image_reward_model.score(prompt, pil_images)
 
 
 @torch.no_grad()
-def gender_reward(pil_images: list[PIL.Image.Image]) -> list[float]:
+def gender_reward(pil_images: list[PIL.Image.Image], device: str = "cpu") -> list[float]:
     if not hasattr(gender_reward, "_init"):
         logging.set_verbosity_error()
         gender_reward.pipe = pipeline(
             "image-classification",
             model="rizvandwiki/gender-classification",
-            device="cpu",
+            device=device,
             top_k=None,
         )
         gender_reward._init = True
@@ -68,11 +75,13 @@ def tensor_batch_to_pil_images(latents_batch: torch.Tensor) -> list[PIL.Image.Im
 
 @torch.no_grad()
 def compute_reward_metrics(
-    pil_images: list[PIL.Image.Image], prompt: str = DEFAULT_REWARD_PROMPT
+    pil_images: list[PIL.Image.Image],
+    prompt: str = DEFAULT_REWARD_PROMPT,
+    device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
-    ir_person = image_reward(pil_images, prompt)
-    sex_score = gender_reward(pil_images)
-    aesthetics_score = aesthetics_reward(pil_images)
+    ir_person = image_reward(pil_images, prompt, device=device)
+    sex_score = gender_reward(pil_images, device=device)
+    aesthetics_score = aesthetics_reward(pil_images, device=device)
 
     sex_score = torch.as_tensor(sex_score, dtype=torch.float32)
     ir_person = torch.as_tensor(ir_person, dtype=torch.float32)
@@ -104,9 +113,10 @@ def reward_function(
     prompt: str = DEFAULT_REWARD_PROMPT,
     male_threshold: float = 0.8,
     gender_weight: float = 2.0,
+    device: str = "cpu",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     images = tensor_batch_to_pil_images(latents_batch)
-    metrics = compute_reward_metrics(images, prompt=prompt)
+    metrics = compute_reward_metrics(images, prompt=prompt, device=device)
     total_score, sex_score_binary = compute_total_reward(
         metrics["ir_person"],
         metrics["sex_score"],
