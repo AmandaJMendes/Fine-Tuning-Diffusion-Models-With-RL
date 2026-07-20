@@ -79,8 +79,10 @@ def compute_reward_metrics(
     prompt: str = DEFAULT_REWARD_PROMPT,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
-    ir_person = image_reward(pil_images, prompt, device=device)
-    sex_score = gender_reward(pil_images, device=device)
+    # Aesthetic experiment (provisory): skip ImageReward and the gender
+    # classifier to avoid two extra model forward passes per batch.
+    ir_person = [0.0] * len(pil_images)  # image_reward(pil_images, prompt, device=device)
+    sex_score = [0.0] * len(pil_images)  # gender_reward(pil_images, device=device)
     aesthetics_score = aesthetics_reward(pil_images, device=device)
 
     sex_score = torch.as_tensor(sex_score, dtype=torch.float32)
