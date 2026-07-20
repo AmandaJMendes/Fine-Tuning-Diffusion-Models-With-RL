@@ -26,3 +26,6 @@ artifacts/models/
 analysis/comparison/
 media/
 paper/
+
+# W&B run exports (large; kept locally, not tracked)
+artifacts/wandb_export/
