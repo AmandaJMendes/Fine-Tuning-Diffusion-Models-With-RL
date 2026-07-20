@@ -4,25 +4,26 @@ import json
 import logging
 import math
 import os
+import shutil
 import time
 from collections.abc import Generator
 
 import torch
 import torch.distributed as dist
-import wandb
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from diffusers import UNet2DModel
 from tqdm import tqdm
 
+import wandb
 from tao_diffusion.custom_ddim_scheduler import CustomDDIMScheduler
 from tao_diffusion.rewards import (
     DEFAULT_REWARD_PROMPT,
     reward_function,
     tensor_batch_to_pil_images,
 )
-from tao_diffusion.sampling import generate_batch
+from tao_diffusion.sampling import generate_batch, generate_eval_samples
 
 
 @contextlib.contextmanager
@@ -112,6 +113,62 @@ def check_model_sync(model: UNet2DModel, accelerator: Accelerator, tol: float = 
             _logger.warning(f"Parameter mismatch across ranks detected (max |Δ| = {max_diff:.3e})")
 
 
+def save_checkpoint(
+    accelerator: Accelerator,
+    checkpoint_dir: str,
+    global_step: int,
+    epoch: int,
+) -> None:
+    """
+    Save a resumable checkpoint (model + optimizer + RNG + scheduler state) using
+    accelerator.save_state, plus a small metadata file with global_step and epoch.
+
+    Writes to a temp directory then atomically swaps it into place, so a crash
+    mid-save never corrupts the previous checkpoint.  Only one checkpoint is
+    ever kept (checkpoint_dir is overwritten).  Must be called by all ranks.
+    """
+    tmp_dir = checkpoint_dir + ".tmp"
+    if accelerator.is_main_process:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    accelerator.wait_for_everyone()
+
+    accelerator.save_state(tmp_dir)
+
+    if accelerator.is_main_process:
+        meta = {"global_step": int(global_step), "epoch": int(epoch)}
+        with open(os.path.join(tmp_dir, "training_meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+        # Atomic swap: remove old, rename new into place.
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+        os.rename(tmp_dir, checkpoint_dir)
+        logging.getLogger(__name__).info(
+            f"Checkpoint saved (epoch={epoch}, global_step={global_step}) → {checkpoint_dir}"
+        )
+    accelerator.wait_for_everyone()
+
+
+def load_checkpoint(
+    accelerator: Accelerator,
+    checkpoint_dir: str,
+) -> tuple[int, int]:
+    """
+    Restore model, optimizer, RNG, and scheduler state from checkpoint_dir.
+    Returns (global_step, epoch) saved in the checkpoint's metadata.
+    Must be called by all ranks, after accelerator.prepare().
+    """
+    if not os.path.isdir(checkpoint_dir):
+        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
+    accelerator.load_state(checkpoint_dir)
+    with open(os.path.join(checkpoint_dir, "training_meta.json")) as f:
+        meta = json.load(f)
+    global_step = int(meta["global_step"])
+    epoch = int(meta["epoch"])
+    logging.getLogger(__name__).info(
+        f"Resumed from {checkpoint_dir} (epoch={epoch}, global_step={global_step})"
+    )
+    return global_step, epoch
+
+
 def evaluate_model(
     step: int,
     model: UNet2DModel,
@@ -124,10 +181,29 @@ def evaluate_model(
     reward_prompt: str = DEFAULT_REWARD_PROMPT,
     gender_threshold: float = 0.8,
     gender_weight: float = 2.0,
+    reward_device: str = "cuda",
 ) -> None:
     """
-    Deterministic evaluation that does not touch the global RNG
-    (→ training randomness proceeds as usual).
+    Deterministic, **portable**, parallelized evaluation.
+
+    Every eval image is identified by a global index g ∈ [0, num_samples).
+    Its noise stream (x_T + all per-step DDIM variance noise) comes from a
+    CPU generator seeded (fixed_seed + g), so the set of eval images is:
+
+      * independent of the number of GPUs — image identity is determined
+        by g, not by which rank generates it.  Work is distributed across
+        ranks via stride sharding (rank r generates indices
+        {r, r+P, r+2P, …}) and the results are gathered and reordered
+        into global-index order;
+      * independent of GPU architecture — the RNG runs on CPU;
+      * independent of the training RNG — private generators are used.
+
+    Note: the UNet forward pass itself is not bit-exact across GPU
+    families (different cuDNN kernels do slightly different floating-point
+    reductions), so two runs on different architectures will produce
+    near-identical, not pixel-identical, images from the same seed.  The
+    dominant randomness (the injected noise) is identical, which is what
+    makes the images comparable.
     """
     os.makedirs(save_dir, exist_ok=True)
 
@@ -135,63 +211,126 @@ def evaluate_model(
     model.eval()
 
     with torch.no_grad():
-        num_batches = math.ceil(num_samples / (batch_size * accelerator.num_processes))
-        all_rewards = []
-        all_metrics = {
-            k: [] for k in ["ir_person", "sex_score", "sex_score_binary", "aesthetics_score"]
-        }
-        wandb_imgs = []
-        img_idx = 0
+        n_channels = model.config.in_channels
+        image_size = model.config.sample_size
+        num_processes = accelerator.num_processes
+        rank = accelerator.process_index
+        device = accelerator.device
 
-        for i in range(num_batches):
-            # Isolated RNG so eval doesn't perturb the training random state
-            gen = torch.Generator(device=accelerator.device).manual_seed(
-                fixed_seed + i + accelerator.process_index
+        # ------------------------------------------------------------------
+        # Stride sharding: rank r owns global indices {r, r+P, r+2P, …}.
+        # This partitions [0, num_samples) exactly once across ranks with
+        # counts differing by at most 1.  Each image g is seeded by
+        # (fixed_seed + g) on CPU, so the mapping g → image is the same
+        # regardless of which rank produces it or how many ranks exist.
+        # ------------------------------------------------------------------
+        owned_indices = list(range(rank, num_samples, num_processes))
+        max_per_rank = math.ceil(num_samples / num_processes)
+
+        metric_keys = [
+            "ir_person",
+            "sex_score",
+            "sex_score_binary",
+            "aesthetics_score",
+        ]
+
+        # --- Generate this rank's owned images in batches ----------------
+        image_parts: list[torch.Tensor] = []
+        reward_parts: list[torch.Tensor] = []
+        metric_parts: dict[str, list[torch.Tensor]] = {k: [] for k in metric_keys}
+
+        for b_start in range(0, len(owned_indices), batch_size):
+            batch_indices = owned_indices[b_start : b_start + batch_size]
+            samples = generate_eval_samples(
+                model, scheduler, batch_indices, device, base_seed=fixed_seed
             )
-
-            latents, next_latents, _, _ = generate_batch(
-                model, scheduler, batch_size, device=accelerator.device, generator=gen
-            )
-
             rewards, scores = reward_function(
-                next_latents[:, -1],
+                samples,
                 prompt=reward_prompt,
                 male_threshold=gender_threshold,
                 gender_weight=gender_weight,
+                device=reward_device,
             )
-            rewards = rewards.to(accelerator.device)
+            image_parts.append(samples)
+            reward_parts.append(rewards.to(device))
+            for k in metric_keys:
+                metric_parts[k].append(scores[k].to(device))
 
-            all_rewards.append(accelerator.gather(rewards))
-            for k in all_metrics:
-                all_metrics[k].append(
-                    accelerator.gather(scores[k].to(accelerator.device)).cpu().flatten()
+        # --- Concatenate (handle ranks that own zero images) -------------
+        if image_parts:
+            local_images = torch.cat(image_parts)
+            local_rewards = torch.cat(reward_parts)
+            local_metrics = {k: torch.cat(metric_parts[k]) for k in metric_keys}
+        else:
+            local_images = torch.empty(0, n_channels, image_size, image_size, device=device)
+            local_rewards = torch.empty(0, device=device)
+            local_metrics = {k: torch.empty(0, device=device) for k in metric_keys}
+
+        # --- Pad to max_per_rank so every rank has equal-sized tensors ---
+        pad = max_per_rank - local_images.size(0)
+        if pad > 0:
+            local_images = torch.cat(
+                [
+                    local_images,
+                    torch.zeros(pad, n_channels, image_size, image_size, device=device),
+                ]
+            )
+            local_rewards = torch.cat(
+                [
+                    local_rewards,
+                    torch.zeros(pad, device=device),
+                ]
+            )
+            for k in metric_keys:
+                local_metrics[k] = torch.cat(
+                    [
+                        local_metrics[k],
+                        torch.zeros(pad, device=device),
+                    ]
                 )
 
-            gathered = accelerator.gather(next_latents[:, -1].to(accelerator.device))
+        # --- Gather across ranks and reorder to global-index order -------
+        # After gather the tensor is laid out as
+        #   [rank0_block | rank1_block | … | rankP-1_block]
+        # where rank r's block has max_per_rank entries corresponding to
+        # global indices [r, r+P, r+2P, …] (plus any padding at the end).
+        #
+        # Global index g was produced by rank (g % P) at local position
+        # (g // P), so its gathered position is:
+        #   (g % P) * max_per_rank + (g // P)
+        gathered_images = accelerator.gather(local_images)
+        gathered_rewards = accelerator.gather(local_rewards)
+        gathered_metrics = {k: accelerator.gather(local_metrics[k]) for k in metric_keys}
 
-            if accelerator.is_main_process:
-                for img in tensor_batch_to_pil_images(gathered):
-                    img.save(os.path.join(save_dir, f"step_{step:08d}_{img_idx:05d}.png"))
-                    wandb_imgs.append(wandb.Image(img))
-                    img_idx += 1
+        reorder = [
+            (g % num_processes) * max_per_rank + (g // num_processes) for g in range(num_samples)
+        ]
+        all_images = gathered_images[reorder]
+        all_rewards = gathered_rewards[reorder]
 
-        all_rewards = torch.cat(all_rewards)[:num_samples]
         metrics = {
             "eval/reward": all_rewards.mean().item(),
             "eval/reward_std": all_rewards.std(unbiased=False).item(),
         }
-        for k, v in all_metrics.items():
-            vals = torch.cat(v).float()[:num_samples]
+        for k in metric_keys:
+            vals = gathered_metrics[k][reorder].float()
             metrics[f"eval/{k}"] = vals.mean().item()
             metrics[f"eval/{k}_std"] = vals.std().item()
 
         if accelerator.is_main_process:
-            accelerator.log({"eval/samples": wandb_imgs[:num_samples], **metrics}, step=step)
+            wandb_imgs = []
+            for img_idx, img in enumerate(tensor_batch_to_pil_images(all_images)):
+                img.save(
+                    os.path.join(
+                        save_dir,
+                        f"step_{step:08d}_{img_idx:05d}.png",
+                    )
+                )
+                wandb_imgs.append(wandb.Image(img))
+            accelerator.log({"eval/samples": wandb_imgs, **metrics}, step=step)
 
     if was_training:
         model.train()
-
-    torch.cuda.empty_cache()
 
 
 def parse_timesteps_weights(path: str, scheduler_timesteps: list[int]) -> dict[int, float]:
@@ -308,6 +447,14 @@ if __name__ == "__main__":
         default=2.0,
         help="Weight on the gender term in the combined reward",
     )
+    parser.add_argument(
+        "--reward_device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device for reward models (ImageReward, gender, aesthetics). "
+        "Use 'cpu' on low-memory GPUs to avoid OOM.",
+    )
 
     # Evaluation
     parser.add_argument(
@@ -328,6 +475,28 @@ if __name__ == "__main__":
         "--log_grad_stats",
         action="store_true",
         help="Log per-timestep gradient mean/std/norm to W&B (adds hook overhead per backward)",
+    )
+
+    # Checkpointing
+    parser.add_argument(
+        "--checkpoint_every_epochs",
+        type=int,
+        default=10,
+        help="Save a resumable checkpoint every N epochs (model + optimizer + RNG + "
+        "global_step). Only the latest is kept.",
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="artifacts/checkpoints/latest",
+        help="Directory for the single kept checkpoint (overwritten each save).",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to a checkpoint directory to resume from (restores model, optimizer, "
+        "RNG, global_step, and epoch). Skips the pre-training eval.",
     )
 
     parser.set_defaults(**yaml_defaults)
@@ -358,8 +527,10 @@ if __name__ == "__main__":
     if accelerator.is_main_process:
         wandb.run.log_code(
             root=".",
-            include_fn=lambda p: p.startswith(os.path.abspath("tao_diffusion") + "/")
-            or p == os.path.abspath(__file__),
+            include_fn=lambda p: (
+                p.startswith(os.path.abspath("tao_diffusion") + "/")
+                or p == os.path.abspath(__file__)
+            ),
         )
 
     num_batches_per_gpu = math.ceil(
@@ -404,22 +575,29 @@ if __name__ == "__main__":
         wandb.log_artifact(art)
 
     global_step = 0
+    start_epoch = 0
+    if args.resume_from_checkpoint:
+        global_step, start_epoch = load_checkpoint(accelerator, args.resume_from_checkpoint)
 
-    logger.info("Evaluating model before fine-tuning")
-    evaluate_model(
-        step=global_step,
-        model=accelerator.unwrap_model(pretrained_model),
-        scheduler=scheduler,
-        num_samples=args.eval_samples,
-        batch_size=args.local_batch_size,
-        accelerator=accelerator,
-        reward_prompt=args.reward_prompt,
-        gender_threshold=args.gender_threshold,
-        gender_weight=args.gender_weight,
-    )
+    if start_epoch == 0:
+        logger.info("Evaluating model before fine-tuning")
+        evaluate_model(
+            step=global_step,
+            model=accelerator.unwrap_model(pretrained_model),
+            scheduler=scheduler,
+            num_samples=args.eval_samples,
+            batch_size=args.local_batch_size,
+            accelerator=accelerator,
+            reward_prompt=args.reward_prompt,
+            gender_threshold=args.gender_threshold,
+            gender_weight=args.gender_weight,
+            reward_device=args.reward_device,
+        )
 
     for _epoch in tqdm(
-        range(args.num_epochs), desc="Training Epochs", disable=not accelerator.is_main_process
+        range(start_epoch, args.num_epochs),
+        desc="Training Epochs",
+        disable=not accelerator.is_main_process,
     ):
         # Collect trajectories: sample x_T → x_0, record latents/log_probs/rewards
         batches = []
@@ -445,6 +623,7 @@ if __name__ == "__main__":
                 prompt=args.reward_prompt,
                 male_threshold=args.gender_threshold,
                 gender_weight=args.gender_weight,
+                device=args.reward_device,
             )
             rewards = rewards.to(device)
 
@@ -453,7 +632,6 @@ if __name__ == "__main__":
                 all_metrics[k].append(accelerator.gather(scores[k].to(device)).cpu().flatten())
 
             batches.append((latents, next_latents, log_probs, timesteps, rewards))
-            torch.cuda.empty_cache()
 
         # Aggregate rewards across batches and log
         all_rewards = torch.cat(all_rewards)
@@ -501,7 +679,9 @@ if __name__ == "__main__":
 
             for batch in batches:
                 latents, next_latents, log_probs, timesteps, rewards = batch
-                t_to_idx = {int(t.item()): idx for idx, t in enumerate(timesteps)}  # timestep value → trajectory index
+                t_to_idx = {
+                    int(t.item()): idx for idx, t in enumerate(timesteps)
+                }  # timestep value → trajectory index
 
                 # Advantage = normalized reward
                 advantages = (rewards - global_mean) / global_std
@@ -545,14 +725,14 @@ if __name__ == "__main__":
 
                         del lat_gpu, nxt_gpu, t_gpu, loss
                         del new_log_probs, importance_ratio, clipped_ratio
-                        torch.cuda.empty_cache()
 
                         # Optimizer steps once all timesteps for this batch have been accumulated
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
-                        torch.cuda.empty_cache()
 
-                        if accelerator.sync_gradients:  # True only after the optimizer actually stepped
+                        if (
+                            accelerator.sync_gradients
+                        ):  # True only after the optimizer actually stepped
                             global_step += 1
                             if global_step % args.eval_every_steps == 0:
                                 logger.info(f"Evaluating model at step {global_step}")
@@ -566,11 +746,24 @@ if __name__ == "__main__":
                                     reward_prompt=args.reward_prompt,
                                     gender_threshold=args.gender_threshold,
                                     gender_weight=args.gender_weight,
+                                    reward_device=args.reward_device,
                                 )
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 accelerator.wait_for_everyone()
+
+        # Periodic resumable checkpoint at end of epoch (keep only the latest).
+        # Runs once per outer epoch, after all inner epochs complete.
+        if (
+            args.checkpoint_every_epochs > 0 and (_epoch + 1) % args.checkpoint_every_epochs == 0
+        ) or (_epoch + 1) == args.num_epochs:
+            save_checkpoint(
+                accelerator,
+                args.checkpoint_dir,
+                global_step=global_step,
+                epoch=_epoch + 1,
+            )
 
     check_model_sync(pretrained_model, accelerator)
 
