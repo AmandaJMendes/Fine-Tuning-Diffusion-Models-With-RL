@@ -116,31 +116,20 @@ def reward_function(
     device: str = "cpu",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     images = tensor_batch_to_pil_images(latents_batch)
-    # Aesthetic experiment (provisory): reward is the aesthetics score only.
-    # Skip ImageReward and the gender classifier (two extra model forward
-    # passes) to speed up trajectory collection and evaluation. The unused
-    # metrics are returned as constant dummies so callers/logging are
-    # unchanged. Revert this block to use compute_reward_metrics to restore.
-    # metrics = compute_reward_metrics(images, prompt=prompt, device=device)
-    # _, sex_score_binary = compute_total_reward(
-    #     metrics["ir_person"],
-    #     metrics["sex_score"],
-    #     male_threshold=male_threshold,
-    #     gender_weight=gender_weight,
-    # )
-    # total_score = metrics["aesthetics_score"]
-    aesthetics_score = torch.as_tensor(
-        aesthetics_reward(images, device=device), dtype=torch.float32
+    metrics = compute_reward_metrics(images, prompt=prompt, device=device)
+    _, sex_score_binary = compute_total_reward(
+        metrics["ir_person"],
+        metrics["sex_score"],
+        male_threshold=male_threshold,
+        gender_weight=gender_weight,
     )
-    total_score = aesthetics_score
-
-    n = aesthetics_score.shape[0]
-    sex_score_binary = torch.zeros(n, dtype=torch.float32)
+    # Aesthetic experiment: reward is the aesthetics score (not IR + gender).
+    total_score = metrics["aesthetics_score"]
 
     # Return all metrics for logging
     return total_score, {
-        "ir_person": torch.zeros(n, dtype=torch.float32),
-        "sex_score": torch.zeros(n, dtype=torch.float32),
+        "ir_person": metrics["ir_person"],
+        "sex_score": metrics["sex_score"],
         "sex_score_binary": sex_score_binary,
-        "aesthetics_score": aesthetics_score,
+        "aesthetics_score": metrics["aesthetics_score"],
     }
