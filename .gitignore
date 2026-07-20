@@ -23,3 +23,6 @@ artifacts/comparison/
 artifacts/frames/
 artifacts/gifs/
 artifacts/models/
+
+# W&B run exports (large; kept locally, not tracked)
+artifacts/wandb_export/
